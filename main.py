@@ -190,7 +190,7 @@ def run_tool(tool_name: str, argument_text: str) -> str:
     print()
 
     if tool_name not in AVAILABLE_TOOL:
-        return f"ERROR: Unknown tool requested: {tool_name}"
+        result = f"ERROR: Unknown tool requested: {tool_name}"
         log_tool_call(tool_name, argument_text, result)
         return result
 
@@ -211,7 +211,7 @@ def run_tool(tool_name: str, argument_text: str) -> str:
         log_tool_call(tool_name, argument_text, result)
         return result
     except Exception as error:
-        return f"ERROR: Tool failed: {error}"
+        result = f"ERROR: Tool failed: {error}"
         log_tool_call(tool_name, argument_text, result)
         return result
 
