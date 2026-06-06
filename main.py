@@ -25,6 +25,7 @@ from tools import (
     execute_terminal_command,
     get_file_info,
     git_diff,
+    git_log,
     git_status,
     glob_files,
     list_files,
@@ -34,9 +35,15 @@ from tools import (
     read_file,
     read_many_files,
     read_file_range,
+    read_global_memory,
+    read_project_memory,
+    read_session,
     run_python_tests,
     search_files,
+    search_sessions,
     set_llm,
+    update_global_memory,
+    update_project_memory,
     web_fetch,
     write_file,
 )
@@ -58,8 +65,13 @@ AVAILABLE_TOOL = {
     "compile_python": compile_python,
     "git_status": git_status,
     "git_diff": git_diff,
+    "git_log": git_log,
     "execute_terminal_command": execute_terminal_command,
     "web_fetch": web_fetch,
+    "update_global_memory": update_global_memory,
+    "update_project_memory": update_project_memory,
+    "search_sessions": search_sessions,
+    "read_session": read_session,
 }
 
 # The agent's own home: where this code lives. This is where the API key
@@ -171,7 +183,10 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a text file inside the project.",
+            "description": (
+                "Read a text file inside the project. Each line is shown with a leading "
+                "'line_number: ' prefix for reference only; that prefix is not part of the file."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -344,8 +359,32 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "git_log",
+            "description": (
+                "Show recent git commits in compact one-line format. "
+                "Use this to understand how the project evolved before making changes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "type": "integer",
+                        "description": "How many recent commits to show (1 to 50).",
+                    }
+                },
+                "required": ["count"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "apply_patch",
-            "description": "Apply one or more exact text replacements to a file inside the project.",
+            "description": (
+                "Apply one or more exact text replacements to a file inside the project. "
+                "old_text must be the literal file text, without any 'line_number: ' prefix shown "
+                "by read_file or read_file_range. It must match exactly once."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -423,7 +462,8 @@ TOOLS = [
             "name": "search_files",
             "description": (
                 "Search for text inside project files using a regular expression. "
-                "Plain words work too, like main. Regex examples: def .*tool, import (os|json), TODO|FIXME."
+                "Plain words work too, like main. Regex examples: def .*tool, import (os|json), TODO|FIXME. "
+                "Pass file_glob to scope the search to certain files, which is faster and less noisy."
             ),
             "parameters": {
                 "type": "object",
@@ -435,6 +475,13 @@ TOOLS = [
                     "path": {
                         "type": "string",
                         "description": "Folder path relative to the project root.",
+                    },
+                    "file_glob": {
+                        "type": "string",
+                        "description": (
+                            "Optional filename pattern to limit which files are searched, "
+                            "such as *.py or *.md. Use an empty string to search all files."
+                        ),
                     },
                 },
                 "required": ["pattern", "path"],
@@ -492,6 +539,99 @@ TOOLS = [
                     },
                 },
                 "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_global_memory",
+            "description": (
+                "Update your long-term memory about the USER (not about any project). "
+                "Use this for durable facts about who the user is, their preferences, goals, and how "
+                "they like to work. You maintain this yourself: whenever you learn something lasting "
+                "and important about the user, save it here. "
+                "You provide the FULL new memory content, which replaces the old file, so include the "
+                "facts you want to keep plus the new one, and drop anything stale. "
+                "Keep it concise markdown; it must stay under 2000 characters."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The full new global memory content, as concise markdown.",
+                    }
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_project_memory",
+            "description": (
+                "Update your long-term memory about the CURRENT PROJECT (not about the user). "
+                "Use this for durable project knowledge: architecture, key files, decisions, "
+                "conventions, gotchas, and open tasks. You maintain this yourself: whenever you learn "
+                "something lasting and important about the project, save it here. "
+                "You provide the FULL new memory content, which replaces the old file, so include the "
+                "knowledge you want to keep plus the new one, and drop anything stale. "
+                "Keep it concise markdown; it must stay under 6000 characters."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The full new project memory content, as concise markdown.",
+                    }
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_sessions",
+            "description": (
+                "Search past saved conversations (sessions) in this project for a word or regular "
+                "expression. Use this to recall something discussed in an earlier session. "
+                "Returns short matching snippets with the session name and date, newest first. "
+                "Then use read_session to read a specific session in full if you need more context."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Word or regular expression to search for, case-insensitive.",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_session",
+            "description": (
+                "Read one past session conversation in full, by its session name "
+                "(for example session-20260605-153012). Use this after search_sessions to see the "
+                "full context around a match."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The session name, with or without the .json extension.",
+                    }
+                },
+                "required": ["name"],
             },
         },
     },
@@ -707,6 +847,7 @@ def describe_tool_calls(tool_calls) -> str:
     folders = []
     checks = []
     commands = []
+    memory_notes = []
     other_tools = []
 
     for tool_call in tool_calls:
@@ -743,6 +884,10 @@ def describe_tool_calls(tool_calls) -> str:
             pattern = arguments.get("pattern", "")
             path = arguments.get("path", ".")
             searches.append(f"'{pattern}' in {path}")
+        elif tool_name == "search_sessions":
+            searches.append(f"'{arguments.get('query', '')}' in past sessions")
+        elif tool_name == "read_session":
+            reads.append(f"session {arguments.get('name', '?')}")
         elif tool_name == "list_project_tree":
             folders.append(f"{arguments.get('path', '.')} tree")
         elif tool_name in ("list_files", "glob_files"):
@@ -757,8 +902,14 @@ def describe_tool_calls(tool_calls) -> str:
         elif tool_name == "git_diff":
             path = arguments.get("path", "")
             checks.append(f"git diff {path}".strip())
+        elif tool_name == "git_log":
+            checks.append("git log")
         elif tool_name == "execute_terminal_command":
             commands.append(arguments.get("command", "a terminal command"))
+        elif tool_name == "update_global_memory":
+            memory_notes.append("global memory")
+        elif tool_name == "update_project_memory":
+            memory_notes.append("project memory")
         elif tool_name not in other_tools:
             other_tools.append(tool_name)
 
@@ -776,6 +927,8 @@ def describe_tool_calls(tool_calls) -> str:
         parts.append(f"check {', '.join(checks[:3])}")
     if commands:
         parts.append(f"run: {commands[0]}")
+    if memory_notes:
+        parts.append(f"update {', '.join(memory_notes)}")
     if other_tools:
         parts.append(f"use {', '.join(other_tools)}")
     
@@ -1205,7 +1358,7 @@ def build_system_prompt() -> str:
         "Use move_file to rename or move a file, and delete_file to delete a file, instead of execute_terminal_command. "
         "Use web_fetch to get live information from the internet, such as current weather or stock prices, when the user asks for current data. "
         "Use read_file_range when you need only part of a long file. "
-        "Use run_python_tests for unittest, compile_python for syntax checks, and git_status or git_diff for git inspection. "
+        "Use run_python_tests for unittest, compile_python for syntax checks, and git_status, git_diff, or git_log for git inspection. "
         "Do not use execute_terminal_command for reading, listing, or searching files. "
         "Use execute_terminal_command only for unusual scripts, uv commands not covered by another tool, or commands the user explicitly asks to run. "
         "For anything beyond a simple reply, briefly share your plan first in natural language: what you understand the goal to be, your approach, and for coding or debugging how you will verify the result. "
@@ -1215,8 +1368,25 @@ def build_system_prompt() -> str:
         "After reading tool results, briefly explain what you learned and what you will do next. "
         "Keep notes short. Do not reveal hidden chain-of-thought. "
         "When the user asks you to inspect, create, edit, or run something on the computer, use tools instead of only explaining. "
+        "You keep your own long-term memory across sessions. Use update_global_memory for durable facts about the user (preferences, goals, how they work) and update_project_memory for durable knowledge about the current project (architecture, decisions, conventions, gotchas). "
+        "Maintain them yourself: whenever you learn something lasting and important, save it without being asked, and keep each memory concise and curated. Do not store secrets or trivial one-off details. "
+        "To recall something from an earlier conversation, use search_sessions to find matching past sessions, then read_session to read one in full. "
         "You are running in a plain terminal, so write in plain text. Do not use markdown formatting such as **bold**, *italics*, # headings, backtick code spans, or tables. Use simple short paragraphs, and plain hyphens for lists."
     )
+
+def build_system_content() -> str:
+    content = build_system_prompt()
+
+    global_memory = read_global_memory().strip()
+    project_memory = read_project_memory().strip()
+
+    if global_memory:
+        content += "\n\nWhat you remember about the user:\n" + global_memory
+
+    if project_memory:
+        content += "\n\nWhat you know about this project:\n" + project_memory
+
+    return content
 
 def main():
     load_dotenv(AGENT_HOME / ".env")
@@ -1238,7 +1408,7 @@ def main():
     messages = [
         {
             "role": "system",
-            "content": build_system_prompt(),
+            "content": build_system_content(),
         }
     ]
 

@@ -15,17 +15,29 @@ from safety import decide_command
 # instead of being locked to where its own code lives.
 PROJECT_ROOT = Path.cwd()
 AGENT_DIR = PROJECT_ROOT / ".simpleagent"
-_LLM_CLIENT = None
-_LLM_MODEL = ""
 MAX_OUTPUT_CHARS = 4000
 MAX_READ_RANGE_LINES = 250
 MAX_READ_MANY_FILES = 8
 MAX_READ_MANY_CHARS_PER_FILE = 1500
 MAX_TREE_DEPTH = 5
 MAX_TREE_ITEMS = 200
+MAX_SEARCH_MATCHES = 100
 APPROVED_THIS_SESSION = set()
 LOGS_DIR = AGENT_DIR / "logs"
 TOOL_LOG_FILE = LOGS_DIR / "tool_call.log"
+SESSIONS_DIR = AGENT_DIR / "sessions"
+MAX_SESSION_MATCHES = 20
+MAX_MATCHES_PER_SESSION = 3
+SESSION_SNIPPET_CHARS = 200
+
+# Global memory: facts about the user, kept in the user's home folder so it
+# is shared across every project. Project memory: knowledge about the current
+# project, kept inside that project's .simpleagent folder.
+GLOBAL_MEMORY_DIR = Path.home() / ".simpleagent"
+GLOBAL_MEMORY_FILE = GLOBAL_MEMORY_DIR / "memory.md"
+PROJECT_MEMORY_FILE = AGENT_DIR / "memory.md"
+GLOBAL_MEMORY_MAX_CHARS = 2000
+PROJECT_MEMORY_MAX_CHARS = 6000
 SKIPPED_TREE_DIRS = {
     ".git",
     ".venv",
@@ -181,7 +193,14 @@ def web_fetch(url: str, prompt: str = "") -> str:
 def shorten_output(text: str) -> str:
     if len(text) <= MAX_OUTPUT_CHARS:
         return text
-    return text[:MAX_OUTPUT_CHARS] + "\n\n[Output truncated]"
+
+    truncated = text[:MAX_OUTPUT_CHARS]
+    last_newline = truncated.rfind("\n")
+
+    if last_newline > 0:
+        truncated = truncated[:last_newline]
+
+    return truncated + "\n\n[Output truncated]"
 
 
 def shorten_file_content(text: str) -> str:
@@ -233,6 +252,10 @@ def resolve_project_path(path: str) -> Path:
     return target_path
 
 
+def is_ignored_path(path: Path) -> bool:
+    return any(part in SKIPPED_TREE_DIRS for part in path.parts)
+
+
 def list_files(path: str = ".") -> str:
     try:
         target_path = resolve_project_path(path)
@@ -270,8 +293,12 @@ def read_file(path: str) -> str:
             return "ERROR: Path is not a file."
 
         content = target_path.read_text(encoding="utf-8")
+        numbered = "\n".join(
+            f"{line_number}: {line}"
+            for line_number, line in enumerate(content.splitlines(), start=1)
+        )
 
-        return shorten_output(content)
+        return shorten_output(numbered)
 
     except Exception as error:
         return f"ERROR: {error}"
@@ -447,7 +474,7 @@ def write_file(path: str, content: str) -> str:
         return f"ERROR: {error}"
 
 
-def search_files(pattern: str, path: str = ".") -> str:
+def search_files(pattern: str, path: str = ".", file_glob: str = "") -> str:
     try:
         regex = re.compile(pattern, re.IGNORECASE)
     except re.error as error:
@@ -459,13 +486,18 @@ def search_files(pattern: str, path: str = ".") -> str:
         if not target_path.exists():
             return "ERROR: Path does not exist."
 
+        glob_pattern = file_glob or "*"
         matches = []
+        truncated = False
 
-        for file_path in target_path.rglob("*"):
+        for file_path in target_path.rglob(glob_pattern):
+            if truncated:
+                break
+
             if not file_path.is_file():
                 continue
 
-            if ".venv" in file_path.parts or "__pycache__" in file_path.parts:
+            if is_ignored_path(file_path):
                 continue
 
             try:
@@ -479,10 +511,22 @@ def search_files(pattern: str, path: str = ".") -> str:
                     relative_path = file_path.relative_to(PROJECT_ROOT)
                     matches.append(f"{relative_path}:{line_number}: {line}")
 
+                    if len(matches) >= MAX_SEARCH_MATCHES:
+                        truncated = True
+                        break
+
         if not matches:
             return "No matches found."
 
-        return shorten_output("\n".join(matches))
+        result = "\n".join(matches)
+
+        if truncated:
+            result += (
+                f"\n\n[Stopped at {MAX_SEARCH_MATCHES} matches. "
+                "Narrow the pattern or use file_glob to scope the search.]"
+            )
+
+        return shorten_output(result)
 
     except Exception as error:
         return f"ERROR: {error}"
@@ -521,12 +565,8 @@ def log_tool_call(tool_name: str, arguments: str, result: str) -> None:
         f"{'-' * 60}\n"
     )
 
-    TOOL_LOG_FILE.write_text(
-        TOOL_LOG_FILE.read_text(encoding="utf-8") + log_entry
-        if TOOL_LOG_FILE.exists()
-        else log_entry,
-        encoding="utf-8",
-    )
+    with open(TOOL_LOG_FILE, "a", encoding="utf-8") as log_file:
+        log_file.write(log_entry)
 
 
 def glob_files(pattern: str, path: str = ".") -> str:
@@ -539,7 +579,7 @@ def glob_files(pattern: str, path: str = ".") -> str:
         matches = []
 
         for file_path in target_path.rglob(pattern):
-            if ".venv" in file_path.parts or "__pycache__" in file_path.parts:
+            if is_ignored_path(file_path):
                 continue
 
             relative_path = file_path.relative_to(PROJECT_ROOT)
@@ -622,10 +662,10 @@ def move_file(source: str, destination: str) -> str:
             return "ERROR: Source file does not exist."
 
         if not source_path.is_file():
-            return "Error: move_file only moves files, not folders."
-        
+            return "ERROR: move_file only moves files, not folders."
+
         if destination_path.exists():
-            return "Error: Destination already exists."
+            return "ERROR: Destination already exists."
         
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         source_path.rename(destination_path)
@@ -657,7 +697,7 @@ def compile_python(paths: list[str] | None = None) -> str:
         paths = [
             str(path.relative_to(PROJECT_ROOT))
             for path in sorted(PROJECT_ROOT.rglob("*.py"))
-            if ".venv" not in path.parts and "__pycache__" not in path.parts
+            if not is_ignored_path(path)
         ]
 
     if not paths:
@@ -694,6 +734,142 @@ def git_diff(path: str = "") -> str:
         command.extend(["--", str(target_path.relative_to(PROJECT_ROOT))])
 
     return run_project_command(command, timeout=15)
+
+
+def git_log(count: int = 10) -> str:
+    count = max(1, min(int(count), 50))
+    command = ["git", "log", f"-{count}", "--oneline", "--no-decorate"]
+    return run_project_command(command, timeout=15)
+
+
+def read_global_memory() -> str:
+    if GLOBAL_MEMORY_FILE.exists():
+        return GLOBAL_MEMORY_FILE.read_text(encoding="utf-8")
+    return ""
+
+
+def read_project_memory() -> str:
+    if PROJECT_MEMORY_FILE.exists():
+        return PROJECT_MEMORY_FILE.read_text(encoding="utf-8")
+    return ""
+
+
+def update_global_memory(content: str) -> str:
+    if len(content) > GLOBAL_MEMORY_MAX_CHARS:
+        return (
+            f"ERROR: Global memory must stay under {GLOBAL_MEMORY_MAX_CHARS} characters "
+            f"(you sent {len(content)}). Rewrite it more concisely, keeping only the most "
+            "important durable facts about the user."
+        )
+
+    try:
+        GLOBAL_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        GLOBAL_MEMORY_FILE.write_text(content, encoding="utf-8")
+        return f"SUCCESS: Global memory updated ({len(content)} characters)."
+    except Exception as error:
+        return f"ERROR: {error}"
+
+
+def update_project_memory(content: str) -> str:
+    if len(content) > PROJECT_MEMORY_MAX_CHARS:
+        return (
+            f"ERROR: Project memory must stay under {PROJECT_MEMORY_MAX_CHARS} characters "
+            f"(you sent {len(content)}). Rewrite it more concisely, keeping only the most "
+            "important durable knowledge about this project."
+        )
+
+    try:
+        PROJECT_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PROJECT_MEMORY_FILE.write_text(content, encoding="utf-8")
+        return f"SUCCESS: Project memory updated ({len(content)} characters)."
+    except Exception as error:
+        return f"ERROR: {error}"
+
+
+def search_sessions(query: str) -> str:
+    try:
+        regex = re.compile(query, re.IGNORECASE)
+    except re.error as error:
+        return f"ERROR: Invalid search pattern: {error}"
+
+    if not SESSIONS_DIR.exists():
+        return "No saved sessions yet."
+
+    session_files = sorted(SESSIONS_DIR.glob("*.json"), reverse=True)
+    matches = []
+
+    for session_file in session_files:
+        if len(matches) >= MAX_SESSION_MATCHES:
+            break
+
+        try:
+            data = json.loads(session_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        name = data.get("name", session_file.stem)
+        updated_at = data.get("updated_at", "unknown")
+        per_session = 0
+
+        for message in data.get("messages", []):
+            if len(matches) >= MAX_SESSION_MATCHES or per_session >= MAX_MATCHES_PER_SESSION:
+                break
+
+            role = message.get("role", "?")
+            content = message.get("content")
+
+            if role == "system" or not isinstance(content, str) or not content:
+                continue
+
+            for line in content.splitlines():
+                if not regex.search(line):
+                    continue
+
+                snippet = line.strip()
+                if len(snippet) > SESSION_SNIPPET_CHARS:
+                    found = regex.search(snippet)
+                    start = max(0, (found.start() if found else 0) - 80)
+                    prefix = "..." if start > 0 else ""
+                    snippet = prefix + snippet[start:start + SESSION_SNIPPET_CHARS] + "..."
+
+                matches.append(f"{name} ({updated_at}) [{role}]: {snippet}")
+                per_session += 1
+                break
+
+    if not matches:
+        return "No matching sessions found."
+
+    header = f"Found {len(matches)} match(es), newest first:"
+    return shorten_output(header + "\n" + "\n".join(matches))
+
+
+def read_session(name: str) -> str:
+    session_name = name[:-5] if name.endswith(".json") else name
+    session_path = SESSIONS_DIR / f"{session_name}.json"
+
+    if not session_path.exists():
+        return f"ERROR: Session not found: {session_name}"
+
+    try:
+        data = json.loads(session_path.read_text(encoding="utf-8"))
+    except Exception as error:
+        return f"ERROR: {error}"
+
+    lines = [
+        f"Session: {data.get('name', session_name)} "
+        f"(updated {data.get('updated_at', 'unknown')})"
+    ]
+
+    for message in data.get("messages", []):
+        role = message.get("role", "?")
+        content = message.get("content")
+
+        if role == "system" or not isinstance(content, str) or not content.strip():
+            continue
+
+        lines.append(f"[{role}] {content.strip()}")
+
+    return shorten_output("\n\n".join(lines))
 
 
 def is_terminal_file_inspection(command: str) -> bool:

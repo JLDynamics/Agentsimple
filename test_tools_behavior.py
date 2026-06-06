@@ -1,3 +1,4 @@
+import json
 import unittest
 import subprocess
 from pathlib import Path
@@ -274,6 +275,185 @@ class ToolsBehaviorTests(unittest.TestCase):
         self.assertIn("ERROR", result)
         self.assertIn("must be unique", result)
         self.assertEqual(temp_path.read_text(encoding="utf-8"), "x = 1\nx = 1\n")
+
+    def test_update_global_memory_writes_under_cap(self):
+        tmp_dir = Path("tmp_mem_global")
+        tmp_dir.mkdir(exist_ok=True)
+        tmp_file = tmp_dir / "memory.md"
+        self.addCleanup(lambda: tmp_dir.exists() and tmp_dir.rmdir())
+        self.addCleanup(lambda: tmp_file.exists() and tmp_file.unlink())
+
+        with patch.object(tools, "GLOBAL_MEMORY_DIR", tmp_dir), \
+                patch.object(tools, "GLOBAL_MEMORY_FILE", tmp_file):
+            result = tools.update_global_memory("# About\n- likes simple code")
+
+            self.assertIn("SUCCESS", result)
+            self.assertIn("likes simple code", tools.read_global_memory())
+
+    def test_update_global_memory_rejects_over_cap(self):
+        tmp_dir = Path("tmp_mem_global_cap")
+        tmp_dir.mkdir(exist_ok=True)
+        tmp_file = tmp_dir / "memory.md"
+        self.addCleanup(lambda: tmp_dir.exists() and tmp_dir.rmdir())
+        self.addCleanup(lambda: tmp_file.exists() and tmp_file.unlink())
+
+        with patch.object(tools, "GLOBAL_MEMORY_DIR", tmp_dir), \
+                patch.object(tools, "GLOBAL_MEMORY_FILE", tmp_file):
+            result = tools.update_global_memory("x" * (tools.GLOBAL_MEMORY_MAX_CHARS + 1))
+
+            self.assertIn("ERROR", result)
+            self.assertFalse(tmp_file.exists())
+
+    def test_update_project_memory_writes_under_cap(self):
+        tmp_dir = Path("tmp_mem_project")
+        tmp_dir.mkdir(exist_ok=True)
+        tmp_file = tmp_dir / "memory.md"
+        self.addCleanup(lambda: tmp_dir.exists() and tmp_dir.rmdir())
+        self.addCleanup(lambda: tmp_file.exists() and tmp_file.unlink())
+
+        with patch.object(tools, "PROJECT_MEMORY_FILE", tmp_file):
+            result = tools.update_project_memory("# Project\n- uses uv and unittest")
+
+            self.assertIn("SUCCESS", result)
+            self.assertIn("uses uv", tools.read_project_memory())
+
+    def _write_session(self, sessions_dir, file_name, session_data):
+        sessions_dir.mkdir(exist_ok=True)
+        session_file = sessions_dir / file_name
+        session_file.write_text(json.dumps(session_data), encoding="utf-8")
+        self.addCleanup(lambda: sessions_dir.exists() and sessions_dir.rmdir())
+        self.addCleanup(lambda: session_file.exists() and session_file.unlink())
+
+    def test_search_sessions_finds_match(self):
+        sessions_dir = Path("tmp_sessions_search")
+        self._write_session(
+            sessions_dir,
+            "session-20260601-101010.json",
+            {
+                "name": "session-20260601-101010",
+                "updated_at": "2026-06-01T10:10:10",
+                "messages": [
+                    {"role": "system", "content": "system stuff"},
+                    {"role": "user", "content": "how do I configure the work plan feature"},
+                    {"role": "assistant", "content": "we removed the work plan call"},
+                ],
+            },
+        )
+
+        with patch.object(tools, "SESSIONS_DIR", sessions_dir):
+            result = tools.search_sessions("work plan")
+
+        self.assertIn("session-20260601-101010", result)
+        self.assertIn("work plan", result)
+
+    def test_search_sessions_reports_invalid_regex(self):
+        with patch.object(tools, "SESSIONS_DIR", Path("tmp_sessions_missing")):
+            result = tools.search_sessions("work (plan")
+
+        self.assertIn("ERROR", result)
+        self.assertIn("Invalid search pattern", result)
+
+    def test_read_session_returns_conversation(self):
+        sessions_dir = Path("tmp_sessions_read")
+        self._write_session(
+            sessions_dir,
+            "session-x.json",
+            {
+                "name": "session-x",
+                "updated_at": "2026-06-01T10:10:10",
+                "messages": [
+                    {"role": "system", "content": "hidden system text"},
+                    {"role": "user", "content": "hello there agent"},
+                ],
+            },
+        )
+
+        with patch.object(tools, "SESSIONS_DIR", sessions_dir):
+            result = tools.read_session("session-x")
+
+        self.assertIn("hello there agent", result)
+        self.assertIn("[user]", result)
+        self.assertNotIn("hidden system text", result)
+
+    def test_read_file_includes_line_numbers(self):
+        result = tools.read_file("tmp_read_range_test.txt")
+
+        self.assertIn("1: line one", result)
+        self.assertIn("2: line two", result)
+
+    def test_is_ignored_path_skips_git_and_agent_dirs(self):
+        self.assertTrue(tools.is_ignored_path(Path(".git/config")))
+        self.assertTrue(tools.is_ignored_path(Path(".simpleagent/sessions/a.json")))
+        self.assertFalse(tools.is_ignored_path(Path("main.py")))
+
+    def test_log_tool_call_appends_entries(self):
+        tmp_dir = Path("tmp_logs")
+        tmp_file = tmp_dir / "tool_call.log"
+        self.addCleanup(lambda: tmp_dir.exists() and tmp_dir.rmdir())
+        self.addCleanup(lambda: tmp_file.exists() and tmp_file.unlink())
+
+        with patch.object(tools, "LOGS_DIR", tmp_dir), \
+                patch.object(tools, "TOOL_LOG_FILE", tmp_file):
+            tools.log_tool_call("tool_a", "{}", "result a")
+            tools.log_tool_call("tool_b", "{}", "result b")
+            text = tmp_file.read_text(encoding="utf-8")
+
+        self.assertIn("TOOL: tool_a", text)
+        self.assertIn("TOOL: tool_b", text)
+
+    def test_move_file_rejects_existing_destination(self):
+        source = Path("tmp_move_src2.txt")
+        source.write_text("a\n", encoding="utf-8")
+        dest = Path("tmp_move_dst2.txt")
+        dest.write_text("b\n", encoding="utf-8")
+        self.addCleanup(lambda: source.exists() and source.unlink())
+        self.addCleanup(lambda: dest.exists() and dest.unlink())
+
+        result = tools.move_file("tmp_move_src2.txt", "tmp_move_dst2.txt")
+
+        self.assertIn("ERROR", result)
+        self.assertIn("already exists", result)
+        self.assertTrue(source.exists())
+
+    def test_search_files_respects_file_glob(self):
+        py_file = Path("tmp_glob_test.py")
+        py_file.write_text("zzunique_token = 1\n", encoding="utf-8")
+        txt_file = Path("tmp_glob_test.txt")
+        txt_file.write_text("zzunique_token here\n", encoding="utf-8")
+        self.addCleanup(lambda: py_file.exists() and py_file.unlink())
+        self.addCleanup(lambda: txt_file.exists() and txt_file.unlink())
+
+        result = tools.search_files("zzunique_token", ".", "*.py")
+
+        self.assertIn("tmp_glob_test.py", result)
+        self.assertNotIn("tmp_glob_test.txt", result)
+
+    def test_git_log_runs_oneline_command(self):
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="abc123 first commit\n",
+            stderr="",
+        )
+
+        with patch("tools.subprocess.run", return_value=completed) as fake_run:
+            result = tools.git_log(5)
+
+        command = fake_run.call_args.args[0]
+        self.assertEqual(command, ["git", "log", "-5", "--oneline", "--no-decorate"])
+        self.assertIn("SUCCESS", result)
+        self.assertIn("first commit", result)
+
+    def test_shorten_output_truncates_at_line_boundary(self):
+        line = "x" * 100
+        text = "\n".join([line] * 60)
+
+        result = tools.shorten_output(text)
+
+        self.assertIn("[Output truncated]", result)
+        before = result.split("\n\n[Output truncated]")[0]
+        for output_line in before.splitlines():
+            self.assertEqual(len(output_line), 100)
 
 
 if __name__ == "__main__":
