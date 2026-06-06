@@ -1,4 +1,5 @@
 import json
+import shutil
 import unittest
 import subprocess
 from pathlib import Path
@@ -443,6 +444,54 @@ class ToolsBehaviorTests(unittest.TestCase):
         self.assertEqual(command, ["git", "log", "-5", "--oneline", "--no-decorate"])
         self.assertIn("SUCCESS", result)
         self.assertIn("first commit", result)
+
+    def test_save_and_read_skill(self):
+        proj = Path("tmp_skills_proj")
+        glob = Path("tmp_skills_glob")
+        self.addCleanup(lambda: shutil.rmtree(proj, ignore_errors=True))
+        self.addCleanup(lambda: shutil.rmtree(glob, ignore_errors=True))
+
+        with patch.object(tools, "PROJECT_SKILLS_DIR", proj), \
+                patch.object(tools, "GLOBAL_SKILLS_DIR", glob):
+            saved = tools.save_skill(
+                "add-a-tool", "How to add a tool", "Step 1. write the function", "project"
+            )
+            loaded = tools.read_skill("add-a-tool")
+            index = tools.list_skills_index()
+
+        self.assertIn("SUCCESS", saved)
+        self.assertIn("Step 1. write the function", loaded)
+        self.assertIn("add-a-tool", index)
+        self.assertIn("How to add a tool", index)
+
+    def test_save_skill_rejects_over_cap(self):
+        proj = Path("tmp_skills_cap")
+        self.addCleanup(lambda: shutil.rmtree(proj, ignore_errors=True))
+
+        with patch.object(tools, "PROJECT_SKILLS_DIR", proj):
+            result = tools.save_skill(
+                "big", "desc", "x" * (tools.SKILL_MAX_CHARS + 1), "project"
+            )
+
+        self.assertIn("ERROR", result)
+        self.assertFalse((proj / "big.md").exists())
+
+    def test_delete_skill(self):
+        proj = Path("tmp_skills_del")
+        glob = Path("tmp_skills_del_global")
+        self.addCleanup(lambda: shutil.rmtree(proj, ignore_errors=True))
+        self.addCleanup(lambda: shutil.rmtree(glob, ignore_errors=True))
+
+        with patch.object(tools, "PROJECT_SKILLS_DIR", proj), \
+                patch.object(tools, "GLOBAL_SKILLS_DIR", glob):
+            tools.save_skill("temp-skill", "d", "body", "project")
+            before = tools.list_skills_index()
+            result = tools.delete_skill("temp-skill")
+            after = tools.list_skills_index()
+
+        self.assertIn("temp-skill", before)
+        self.assertIn("SUCCESS", result)
+        self.assertNotIn("temp-skill", after)
 
     def test_shorten_output_truncates_at_line_boundary(self):
         line = "x" * 100

@@ -38,6 +38,12 @@ GLOBAL_MEMORY_FILE = GLOBAL_MEMORY_DIR / "memory.md"
 PROJECT_MEMORY_FILE = AGENT_DIR / "memory.md"
 GLOBAL_MEMORY_MAX_CHARS = 2000
 PROJECT_MEMORY_MAX_CHARS = 6000
+
+# Skills: reusable markdown runbooks the agent writes and improves itself.
+# Global skills are general; project skills are specific to one project.
+GLOBAL_SKILLS_DIR = GLOBAL_MEMORY_DIR / "skills"
+PROJECT_SKILLS_DIR = AGENT_DIR / "skills"
+SKILL_MAX_CHARS = 4000
 SKIPPED_TREE_DIRS = {
     ".git",
     ".venv",
@@ -784,6 +790,99 @@ def update_project_memory(content: str) -> str:
         return f"SUCCESS: Project memory updated ({len(content)} characters)."
     except Exception as error:
         return f"ERROR: {error}"
+
+
+def skill_filename(name: str) -> str:
+    return re.sub(r"[^a-z0-9-]+", "-", name.strip().lower()).strip("-")
+
+
+def parse_skill_frontmatter(text: str) -> tuple[str, str]:
+    name = ""
+    description = ""
+    lines = text.splitlines()
+
+    if lines and lines[0].strip() == "---":
+        for line in lines[1:]:
+            if line.strip() == "---":
+                break
+            if line.lower().startswith("name:"):
+                name = line.split(":", 1)[1].strip()
+            elif line.lower().startswith("description:"):
+                description = line.split(":", 1)[1].strip()
+
+    return name, description
+
+
+def list_skills_index() -> str:
+    entries = []
+
+    for scope, folder in (("global", GLOBAL_SKILLS_DIR), ("project", PROJECT_SKILLS_DIR)):
+        if not folder.exists():
+            continue
+
+        for skill_file in sorted(folder.glob("*.md")):
+            try:
+                text = skill_file.read_text(encoding="utf-8")
+            except Exception:
+                continue
+
+            name, description = parse_skill_frontmatter(text)
+            name = name or skill_file.stem
+            entries.append(f"- {name} [{scope}]: {description}")
+
+    return "\n".join(entries)
+
+
+def read_skill(name: str) -> str:
+    slug = skill_filename(name)
+
+    for folder in (PROJECT_SKILLS_DIR, GLOBAL_SKILLS_DIR):
+        skill_file = folder / f"{slug}.md"
+        if skill_file.exists():
+            return shorten_output(skill_file.read_text(encoding="utf-8"))
+
+    return f"ERROR: Skill not found: {name}"
+
+
+def save_skill(name: str, description: str, content: str, scope: str = "project") -> str:
+    if scope not in ("project", "global"):
+        return "ERROR: scope must be 'project' or 'global'."
+
+    slug = skill_filename(name)
+
+    if not slug:
+        return "ERROR: Skill name must contain letters or numbers."
+
+    document = f"---\nname: {slug}\ndescription: {description}\n---\n\n{content}"
+
+    if len(document) > SKILL_MAX_CHARS:
+        return (
+            f"ERROR: Skill must stay under {SKILL_MAX_CHARS} characters "
+            f"(this one is {len(document)}). Make the procedure more concise."
+        )
+
+    try:
+        folder = GLOBAL_SKILLS_DIR if scope == "global" else PROJECT_SKILLS_DIR
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"{slug}.md").write_text(document, encoding="utf-8")
+        return f"SUCCESS: Saved {scope} skill '{slug}' ({len(document)} characters)."
+    except Exception as error:
+        return f"ERROR: {error}"
+
+
+def delete_skill(name: str) -> str:
+    slug = skill_filename(name)
+
+    for scope, folder in (("project", PROJECT_SKILLS_DIR), ("global", GLOBAL_SKILLS_DIR)):
+        skill_file = folder / f"{slug}.md"
+        if skill_file.exists():
+            try:
+                skill_file.unlink()
+                return f"SUCCESS: Deleted {scope} skill '{slug}'."
+            except Exception as error:
+                return f"ERROR: {error}"
+
+    return f"ERROR: Skill not found: {name}"
 
 
 def search_sessions(query: str) -> str:

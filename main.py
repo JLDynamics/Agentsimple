@@ -22,6 +22,7 @@ from tools import (
     apply_patch,
     compile_python,
     delete_file,
+    delete_skill,
     execute_terminal_command,
     get_file_info,
     git_diff,
@@ -30,6 +31,7 @@ from tools import (
     glob_files,
     list_files,
     list_project_tree,
+    list_skills_index,
     log_tool_call,
     move_file,
     read_file,
@@ -38,7 +40,9 @@ from tools import (
     read_global_memory,
     read_project_memory,
     read_session,
+    read_skill,
     run_python_tests,
+    save_skill,
     search_files,
     search_sessions,
     set_llm,
@@ -72,6 +76,9 @@ AVAILABLE_TOOL = {
     "update_project_memory": update_project_memory,
     "search_sessions": search_sessions,
     "read_session": read_session,
+    "read_skill": read_skill,
+    "save_skill": save_skill,
+    "delete_skill": delete_skill,
 }
 
 # The agent's own home: where this code lives. This is where the API key
@@ -635,6 +642,82 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_skill",
+            "description": (
+                "Load the full steps of a saved skill by name. Your available skills are listed in "
+                "your system prompt by name and description; read one before doing a task it covers."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The skill name, for example add-a-tool.",
+                    }
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_skill",
+            "description": (
+                "Create or update a reusable skill: a short markdown runbook for a task you may "
+                "repeat. Save one after finishing a non-trivial task, and update one that was helpful "
+                "but incomplete or wrong. Keep it concise (under 4000 characters)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Short lowercase-hyphen name, like add-a-tool.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "One line describing when to use this skill.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": (
+                            "The procedure as markdown: when to use, steps, pitfalls, and how to "
+                            "verify success."
+                        ),
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": (
+                            "Use 'project' for a skill specific to the current project, or 'global' "
+                            "for a general skill useful in any project."
+                        ),
+                    },
+                },
+                "required": ["name", "description", "content", "scope"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_skill",
+            "description": "Delete a saved skill by name when it is stale or wrong.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The skill name to delete.",
+                    }
+                },
+                "required": ["name"],
+            },
+        },
+    },
 ]
 
 def load_config() -> dict:
@@ -910,6 +993,12 @@ def describe_tool_calls(tool_calls) -> str:
             memory_notes.append("global memory")
         elif tool_name == "update_project_memory":
             memory_notes.append("project memory")
+        elif tool_name == "read_skill":
+            reads.append(f"skill {arguments.get('name', '?')}")
+        elif tool_name == "save_skill":
+            memory_notes.append(f"skill {arguments.get('name', '?')}")
+        elif tool_name == "delete_skill":
+            writes.append(f"delete skill {arguments.get('name', '?')}")
         elif tool_name not in other_tools:
             other_tools.append(tool_name)
 
@@ -1371,6 +1460,7 @@ def build_system_prompt() -> str:
         "You keep your own long-term memory across sessions. Use update_global_memory for durable facts about the user (preferences, goals, how they work) and update_project_memory for durable knowledge about the current project (architecture, decisions, conventions, gotchas). "
         "Maintain them yourself: whenever you learn something lasting and important, save it without being asked, and keep each memory concise and curated. Do not store secrets or trivial one-off details. "
         "To recall something from an earlier conversation, use search_sessions to find matching past sessions, then read_session to read one in full. "
+        "You can save reusable skills, which are short markdown runbooks for tasks you may repeat. After you finish a non-trivial task (several tool calls, a tricky fix, or a workflow worth repeating), save it with save_skill so you can reuse it. Before doing a task a saved skill covers, read_skill to load its steps, and improve a skill with save_skill if it was helpful but incomplete or wrong. Use scope 'project' for project-specific skills and 'global' for general ones. "
         "You are running in a plain terminal, so write in plain text. Do not use markdown formatting such as **bold**, *italics*, # headings, backtick code spans, or tables. Use simple short paragraphs, and plain hyphens for lists."
     )
 
@@ -1385,6 +1475,14 @@ def build_system_content() -> str:
 
     if project_memory:
         content += "\n\nWhat you know about this project:\n" + project_memory
+
+    skills_index = list_skills_index().strip()
+
+    if skills_index:
+        content += (
+            "\n\nSkills you have saved (call read_skill with the name to load the full steps):\n"
+            + skills_index
+        )
 
     return content
 

@@ -12,6 +12,8 @@ a safety layer for terminal commands. Bring your own model API key.
 - Live web fetch (JSON-aware, with optional model-distilled answers)
 - Persistent memory: the agent keeps notes about you (global) and each project
   (project), loaded automatically every session
+- Self-growing skills: the agent writes and improves its own reusable runbooks,
+  loaded on demand so they stay token-cheap
 - Session recall: search past conversations and read any session in full
 - Terminal command execution with an approval safety layer
 - Sessions saved per project, manual `/compact`, slash commands
@@ -68,6 +70,16 @@ The agent maintains its own long-term memory, loaded into context every session:
 It updates these itself when it learns something lasting, and keeps them
 concise. To recall details from earlier conversations, it can search past
 sessions and read any one in full.
+
+## Skills
+
+The agent also writes its own reusable skills — short markdown runbooks for
+tasks it might repeat — under `~/.simpleagent/skills/` (global) and
+`<project>/.simpleagent/skills/` (project). Only the skill names and
+descriptions are loaded into context; the full steps load on demand, so skills
+stay token-cheap. After a non-trivial task the agent saves a skill, and it
+improves existing skills when they were helpful but incomplete — so it gets
+faster and more consistent the more you use it.
 
 ## Run from source (for development)
 
