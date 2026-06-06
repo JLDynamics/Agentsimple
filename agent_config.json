@@ -1,0 +1,11 @@
+{
+    "provider": "openrouter",
+    "base_url": "https://openrouter.ai/api/v1",
+    "model": "deepseek/deepseek-v4-flash",
+    "context_window_tokens": 1000000,
+    "max_agent_steps": 20,
+    "show_tool_calls": false,
+    "stream_messages": true,
+    "tool_display": "summary",
+    "approval_mode": "safe_auto"
+}

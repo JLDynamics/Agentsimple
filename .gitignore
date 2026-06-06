@@ -1,4 +1,8 @@
+# Agent workspace state (sessions, logs, future memory)
+.simpleagent/
+
 # Python-generated files
+sessions/
 __pycache__/
 *.py[oc]
 build/

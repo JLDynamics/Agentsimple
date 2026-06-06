@@ -93,9 +93,17 @@ def starts_with_any(command: str, prefixes: list[str]) -> bool:
     return False
 
 
-def decide_command(command: str) -> CommandDecision:
+def normalize_approval_mode(approval_mode: str) -> str:
+    if approval_mode in ("ask", "safe_auto", "full_auto"):
+        return approval_mode
+
+    return "safe_auto"  # note
+
+
+def decide_command(command: str, approval_mode: str = "safe_auto") -> CommandDecision:
     cleaned_command = command.strip()
     lowered_command = " ".join(cleaned_command.lower().split())
+    approval_mode = normalize_approval_mode(approval_mode)
 
     if not cleaned_command:
         return CommandDecision("block", "Command is empty.")
@@ -103,6 +111,12 @@ def decide_command(command: str) -> CommandDecision:
     for phrase in BLOCK_IF_CONTAINS:
         if phrase in lowered_command:
             return CommandDecision("block", f"Dangerous command pattern: {phrase}")
+
+    if approval_mode == "full_auto":
+        return CommandDecision("allow", "Full auto approval mode.")
+
+    if approval_mode == "ask":
+        return CommandDecision("ask", "Ask approval mode.")
 
     if starts_with_any(lowered_command, AUTO_ALLOW_PREFIXES):
         return CommandDecision("allow", "Known read-only command.")
