@@ -57,9 +57,31 @@ simpleagent
 The agent works on that folder. Its state (sessions, logs) is stored in a
 `.simpleagent/` folder inside the project.
 
+To continue previous work instead of starting fresh:
+
+```
+simpleagent --resume      # choose a saved session before chat starts
+simpleagent --continue    # continue the most recent saved session
+```
+
+Short forms are also supported:
+
+```
+simpleagent -r
+simpleagent -c
+```
+
 Slash commands: `/help`, `/status`, `/tools`, `/memory`, `/skills`, `/mode`,
 `/sessions`, `/compact`, `/rewind [n]`, `/clear`, `/exit`. Press `Ctrl+C` to
 interrupt a running turn.
+
+## Sessions
+
+Sessions are saved per project in `.simpleagent/sessions/`. Use `/sessions` to
+resume, start, name, export, or delete sessions from one menu. The list shows
+the session name (`untitled` by default), last update time, message count, and a
+preview of the first user message. Exports are written as markdown transcripts
+under `.simpleagent/exports/`, which makes them easy to hand to another agent.
 
 ## Memory
 

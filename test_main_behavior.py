@@ -276,6 +276,169 @@ class MainBehaviorTests(unittest.TestCase):
         self.assertIn("Hello", output)
         self.assertIn("world", output)
 
+    def test_delete_session_file_removes_file(self):
+        from pathlib import Path
+
+        sessions_dir = Path("tmp_sessions_delete")
+        sessions_dir.mkdir(exist_ok=True)
+        session_file = sessions_dir / "session-x.json"
+        session_file.write_text("{}", encoding="utf-8")
+        self.addCleanup(lambda: sessions_dir.exists() and sessions_dir.rmdir())
+        self.addCleanup(lambda: session_file.exists() and session_file.unlink())
+
+        with patch.object(main, "SESSIONS_DIR", sessions_dir):
+            deleted = main.delete_session_file("session-x")
+            missing = main.delete_session_file("session-does-not-exist")
+
+        self.assertTrue(deleted)
+        self.assertFalse(missing)
+        self.assertFalse(session_file.exists())
+
+    def test_format_relative_time_reads_recent_and_old(self):
+        from datetime import datetime, timedelta
+
+        recent = (datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds")
+        self.assertEqual(main.format_relative_time(recent), "5 minutes ago")
+
+        hours = (datetime.now() - timedelta(hours=2)).isoformat(timespec="seconds")
+        self.assertEqual(main.format_relative_time(hours), "2 hours ago")
+
+        self.assertEqual(main.format_relative_time("unknown"), "unknown")
+
+    def test_session_preview_returns_first_user_message(self):
+        messages = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "help me add a web_fetch tool"},
+            {"role": "assistant", "content": "sure"},
+        ]
+
+        self.assertEqual(
+            main.session_preview(messages), "help me add a web_fetch tool"
+        )
+        self.assertEqual(main.session_preview([{"role": "system", "content": "x"}]), "")
+
+    def test_rename_session_sets_display_name(self):
+        from pathlib import Path
+
+        sessions_dir = Path("tmp_sessions_rename")
+        sessions_dir.mkdir(exist_ok=True)
+        session_file = sessions_dir / "session-x.json"
+        session_file.write_text('{"name": "session-x", "messages": []}', encoding="utf-8")
+        self.addCleanup(lambda: sessions_dir.exists() and sessions_dir.rmdir())
+        self.addCleanup(lambda: session_file.exists() and session_file.unlink())
+
+        with patch.object(main, "SESSIONS_DIR", sessions_dir):
+            ok = main.rename_session("session-x", "auth-refactor")
+            data = json.loads(session_file.read_text(encoding="utf-8"))
+
+        self.assertTrue(ok)
+        self.assertEqual(data["display_name"], "auth-refactor")
+
+    def test_export_session_markdown_writes_transcript(self):
+        from pathlib import Path
+
+        exports_dir = Path("tmp_exports")
+        sessions_dir = Path("tmp_sessions_export")
+        self.addCleanup(lambda: __import__("shutil").rmtree(exports_dir, ignore_errors=True))
+        self.addCleanup(lambda: __import__("shutil").rmtree(sessions_dir, ignore_errors=True))
+
+        sessions_dir.mkdir(exist_ok=True)
+        session_data = {
+            "name": "session-x",
+            "display_name": "my-feature",
+            "messages": [
+                {"role": "system", "content": "system prompt"},
+                {"role": "user", "content": "add a feature"},
+                {"role": "assistant", "content": "Done, I added it."},
+            ],
+        }
+        (sessions_dir / "session-x.json").write_text(
+            json.dumps(session_data), encoding="utf-8"
+        )
+
+        with patch.object(main, "EXPORTS_DIR", exports_dir), \
+                patch.object(main, "SESSIONS_DIR", sessions_dir):
+            export_path = main.export_session_markdown("session-x")
+            text = export_path.read_text(encoding="utf-8")
+
+        self.assertIn("my-feature", text)
+        self.assertIn("## You", text)
+        self.assertIn("add a feature", text)
+        self.assertIn("## Agent", text)
+        self.assertIn("Done, I added it.", text)
+        self.assertNotIn("system prompt", text)
+
+    def test_pick_session_parses_number(self):
+        sessions = [{"name": "a"}, {"name": "b"}, {"name": "c"}]
+
+        self.assertEqual(main.pick_session(sessions, "2"), {"name": "b"})
+        self.assertIsNone(main.pick_session(sessions, "9"))
+        self.assertIsNone(main.pick_session(sessions, "x"))
+
+    def test_list_saved_sessions_orders_newest_first(self):
+        from pathlib import Path
+
+        sessions_dir = Path("tmp_sessions_order")
+        self.addCleanup(lambda: __import__("shutil").rmtree(sessions_dir, ignore_errors=True))
+        sessions_dir.mkdir(exist_ok=True)
+
+        old_session = {
+            "name": "session-a",
+            "updated_at": "2026-01-01T10:00:00",
+            "messages": [{"role": "user", "content": "old"}],
+        }
+        new_session = {
+            "name": "session-z",
+            "updated_at": "2026-01-02T10:00:00",
+            "messages": [{"role": "user", "content": "new"}],
+        }
+
+        (sessions_dir / "session-a.json").write_text(
+            json.dumps(old_session), encoding="utf-8"
+        )
+        (sessions_dir / "session-z.json").write_text(
+            json.dumps(new_session), encoding="utf-8"
+        )
+
+        with patch.object(main, "SESSIONS_DIR", sessions_dir):
+            sessions = main.list_saved_sessions()
+
+        self.assertEqual([session["name"] for session in sessions], ["session-z", "session-a"])
+
+    def test_continue_most_recent_loads_newest_session(self):
+        system_message = {"role": "system", "content": "new system"}
+
+        with patch("main.most_recent_session_name", return_value="session-new"), \
+                patch("main.load_session", return_value=[
+                    {"role": "system", "content": "old system"},
+                    {"role": "user", "content": "hello"},
+                ]):
+            with redirect_stdout(io.StringIO()):
+                session_name, messages = main.continue_most_recent(system_message)
+
+        self.assertEqual(session_name, "session-new")
+        self.assertEqual(messages[0], system_message)
+        self.assertEqual(messages[1]["content"], "hello")
+
+    def test_resume_session_picker_can_start_new(self):
+        system_message = {"role": "system", "content": "system"}
+
+        with patch("main.list_saved_sessions", return_value=[
+            {
+                "name": "session-1",
+                "display_name": "feature-work",
+                "updated_at": "2026-01-01T10:00:00",
+                "message_count": 2,
+                "preview": "hello",
+            }
+        ]), patch("builtins.input", return_value="new"), \
+                patch("main.create_session_name", return_value="session-new"):
+            with redirect_stdout(io.StringIO()):
+                session_name, messages = main.resume_session_picker(system_message)
+
+        self.assertEqual(session_name, "session-new")
+        self.assertEqual(messages, [system_message])
+
 
 if __name__ == "__main__":
     unittest.main()
