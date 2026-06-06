@@ -16,7 +16,9 @@ a safety layer for terminal commands. Bring your own model API key.
   loaded on demand so they stay token-cheap
 - Session recall: search past conversations and read any session in full
 - Terminal command execution with an approval safety layer
-- Sessions saved per project, manual `/compact`, slash commands
+- Rich terminal UI: welcome banner, a "thinking" spinner, and markdown-rendered
+  replies
+- Sessions saved per project, manual `/compact`, `/rewind`, slash commands
 - Works on whatever folder you launch it in (like a real code agent)
 
 ## Requirements
@@ -55,8 +57,9 @@ simpleagent
 The agent works on that folder. Its state (sessions, logs) is stored in a
 `.simpleagent/` folder inside the project.
 
-Slash commands: `/help`, `/status`, `/tools`, `/mode`, `/sessions`, `/compact`,
-`/clear`, `/exit`. Press `Ctrl+C` to interrupt a running turn.
+Slash commands: `/help`, `/status`, `/tools`, `/memory`, `/skills`, `/mode`,
+`/sessions`, `/compact`, `/rewind [n]`, `/clear`, `/exit`. Press `Ctrl+C` to
+interrupt a running turn.
 
 ## Memory
 

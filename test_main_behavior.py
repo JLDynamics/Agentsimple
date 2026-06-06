@@ -3,6 +3,7 @@ import io
 import unittest
 from contextlib import redirect_stdout
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import main
 
@@ -163,20 +164,16 @@ class MainBehaviorTests(unittest.TestCase):
         self.assertIn("look at folders: .", text)
         self.assertIn("read files: main.py", text)
 
-    def test_collect_streamed_assistant_message_prints_content(self):
-        output = io.StringIO()
-
-        with redirect_stdout(output):
-            message = main.collect_streamed_assistant_message(
-                [
-                    make_stream_chunk(content="Hello"),
-                    make_stream_chunk(content=" world"),
-                ]
-            )
+    def test_collect_streamed_assistant_message_collects_content(self):
+        message = main.collect_streamed_assistant_message(
+            [
+                make_stream_chunk(content="Hello"),
+                make_stream_chunk(content=" world"),
+            ]
+        )
 
         self.assertEqual(message["content"], "Hello world")
         self.assertIsNone(message["tool_calls"])
-        self.assertIn("Agent: Hello world", output.getvalue())
 
     def test_collect_streamed_assistant_message_assembles_tool_calls(self):
         message = main.collect_streamed_assistant_message(
@@ -211,6 +208,73 @@ class MainBehaviorTests(unittest.TestCase):
             message["tool_calls"][0]["function"]["arguments"],
             '{"path": "main.py"}',
         )
+
+    def test_rewind_conversation_drops_last_turns(self):
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "u3"},
+            {"role": "assistant", "content": "a3"},
+        ]
+
+        with redirect_stdout(io.StringIO()):
+            removed = main.rewind_conversation(messages, 2)
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(len(messages), 3)
+        self.assertEqual(messages[-1]["content"], "a1")
+        self.assertEqual(
+            [m["content"] for m in messages if m["role"] == "user"], ["u1"]
+        )
+
+    def test_rewind_conversation_caps_at_system_message(self):
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+        ]
+
+        with redirect_stdout(io.StringIO()):
+            removed = main.rewind_conversation(messages, 5)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["role"], "system")
+
+    def test_show_memory_displays_both_memories(self):
+        with patch("main.read_global_memory", return_value="- likes simple code"), \
+                patch("main.read_project_memory", return_value="- uses uv and unittest"):
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                main.show_memory()
+
+        output = buffer.getvalue()
+        self.assertIn("Global memory", output)
+        self.assertIn("likes simple code", output)
+        self.assertIn("Project memory", output)
+        self.assertIn("uses uv and unittest", output)
+
+    def test_show_skills_lists_index(self):
+        with patch("main.list_skills_index", return_value="- demo [project]: a demo skill"):
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                main.show_skills()
+
+        output = buffer.getvalue()
+        self.assertIn("Saved skills", output)
+        self.assertIn("demo", output)
+
+    def test_print_agent_markdown_renders_content(self):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            main.print_agent_markdown("Hello **world**")
+
+        output = buffer.getvalue()
+        self.assertIn("Hello", output)
+        self.assertIn("world", output)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -781,7 +782,6 @@ def run_tool(
 def collect_streamed_assistant_message(stream) -> dict:
     content_parts = []
     tool_calls_by_index = {}
-    printed_content = False
 
     for chunk in stream:
         choices = getattr(chunk, "choices", None) or []
@@ -793,12 +793,6 @@ def collect_streamed_assistant_message(stream) -> dict:
         content_piece = getattr(delta, "content", None)
 
         if content_piece:
-            if not printed_content:
-                print()
-                print("Agent: ", end="", flush=True)
-                printed_content = True
-
-            print(content_piece, end="", flush=True)
             content_parts.append(content_piece)
 
         for tool_call_delta in getattr(delta, "tool_calls", None) or []:
@@ -831,10 +825,6 @@ def collect_streamed_assistant_message(stream) -> dict:
                     tool_call["function"]["name"] += function_name
                 if function_arguments:
                     tool_call["function"]["arguments"] += function_arguments
-
-    if printed_content:
-        print()
-        print()
 
     tool_calls = [
         tool_calls_by_index[index]
@@ -870,34 +860,45 @@ def print_agent_message(text: str) -> None:
     print()
 
 
+def print_agent_markdown(text: str) -> None:
+    if not text.strip():
+        return
+
+    console.print()
+    console.print("Agent", style="bold cyan")
+    console.print(Markdown(text.strip()))
+    console.print()
+
+
 def create_assistant_message(
     client,
     model_name,
     messages: list[dict],
     stream_messages: bool,
 ) -> dict:
-    if stream_messages:
-        stream = client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-            stream=True,
-        )
-        return collect_streamed_assistant_message(stream)
-
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        tools=TOOLS,
-        tool_choice="auto",
-    )
-
-    assistant_message = response.choices[0].message
-    assistant_record = normal_assistant_message_to_dict(assistant_message)
+    with console.status("Thinking...", spinner="dots"):
+        if stream_messages:
+            stream = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+                stream=True,
+            )
+            assistant_record = collect_streamed_assistant_message(stream)
+        else:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+            )
+            assistant_record = normal_assistant_message_to_dict(
+                response.choices[0].message
+            )
 
     if assistant_record["content"]:
-        print_agent_message(assistant_record["content"])
+        print_agent_markdown(assistant_record["content"])
 
     return assistant_record
 
@@ -1210,14 +1211,34 @@ def show_status(model_name: str, messages: list[dict], config: dict) -> None:
 def show_tools() -> None:
     print()
     print("Available Tools:")
-    
+
     for tool in TOOLS:
         function_info = tool["function"]
         name = function_info["name"]
         description = function_info["description"]
 
         print(f"- {name}: {description}")
-    
+
+    print()
+
+def show_memory() -> None:
+    global_memory = read_global_memory().strip()
+    project_memory = read_project_memory().strip()
+
+    print()
+    print("Global memory (about you):")
+    print(global_memory if global_memory else "  (empty)")
+    print()
+    print("Project memory (this project):")
+    print(project_memory if project_memory else "  (empty)")
+    print()
+
+def show_skills() -> None:
+    index = list_skills_index().strip()
+
+    print()
+    print("Saved skills:")
+    print(index if index else "  (none yet)")
     print()
 
 def show_help() -> None:
@@ -1227,8 +1248,11 @@ def show_help() -> None:
     print("/sessions - List, resume, or start sessions")
     print("/status - Show model, project, memory, tool content, and log file")
     print("/tools - show available agent tools")
+    print("/memory - Show what the agent remembers (global and project)")
+    print("/skills - List the skills the agent has saved")
     print("/help - Show this help message")
     print("/mode    Switch approval mode (ask / safe_auto / full_auto)")
+    print("/rewind [n] - Undo the last n turns (default 1)")
     print("/clear - Clear conversation memory")
     print("exit - Quit the program")
     print()
@@ -1242,6 +1266,35 @@ def clear_conversation(messages: list[dict]) -> None:
     print()
     print("Conversation cleared. Starting fresh!")
     print()
+
+def rewind_conversation(messages: list[dict], count: int) -> int:
+    user_indices = [
+        index
+        for index, message in enumerate(messages)
+        if message.get("role") == "user"
+    ]
+
+    if not user_indices:
+        print()
+        print("Nothing to rewind yet.")
+        print()
+        return 0
+
+    count = max(1, count)
+
+    if count >= len(user_indices):
+        cut = user_indices[0]
+    else:
+        cut = user_indices[-count]
+
+    removed_turns = sum(1 for index in user_indices if index >= cut)
+    del messages[cut:]
+
+    print()
+    print(f"Rewound {removed_turns} turn(s). {len(messages)} messages remain.")
+    print()
+
+    return removed_turns
 
 def choose_mode(config: dict) -> None:
     modes = ["ask", "safe_auto", "full_auto"]
@@ -1461,7 +1514,7 @@ def build_system_prompt() -> str:
         "Maintain them yourself: whenever you learn something lasting and important, save it without being asked, and keep each memory concise and curated. Do not store secrets or trivial one-off details. "
         "To recall something from an earlier conversation, use search_sessions to find matching past sessions, then read_session to read one in full. "
         "You can save reusable skills, which are short markdown runbooks for tasks you may repeat. After you finish a non-trivial task (several tool calls, a tricky fix, or a workflow worth repeating), save it with save_skill so you can reuse it. Before doing a task a saved skill covers, read_skill to load its steps, and improve a skill with save_skill if it was helpful but incomplete or wrong. Use scope 'project' for project-specific skills and 'global' for general ones. "
-        "You are running in a plain terminal, so write in plain text. Do not use markdown formatting such as **bold**, *italics*, # headings, backtick code spans, or tables. Use simple short paragraphs, and plain hyphens for lists."
+        "Your replies are rendered as markdown in the terminal, so you may use light markdown formatting (bold, italics, headings, bullet lists, and fenced code blocks) when it improves clarity. Keep formatting purposeful, not excessive."
     )
 
 def build_system_content() -> str:
@@ -1538,6 +1591,14 @@ def main():
         if command == "/tools":
             show_tools()
             continue
+
+        if command == "/memory":
+            show_memory()
+            continue
+
+        if command == "/skills":
+            show_skills()
+            continue
         
         if command == "/help":
             show_help()
@@ -1553,6 +1614,20 @@ def main():
         
         if command == "/compact":
             messages = compact_conversation(client, model_name, messages)
+            save_session(current_session_name, model_name, messages)
+            continue
+
+        if command == "/rewind" or command.startswith("/rewind "):
+            parts = user_input.strip().split()
+            count = 1
+
+            if len(parts) > 1:
+                try:
+                    count = int(parts[1])
+                except ValueError:
+                    count = 1
+
+            rewind_conversation(messages, count)
             save_session(current_session_name, model_name, messages)
             continue
 
