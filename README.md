@@ -6,10 +6,13 @@ a safety layer for terminal commands. Bring your own model API key.
 
 ## Features
 
-- File tools: list, tree, glob, read (full / range / many), search (regex),
-  write, patch, move, delete
-- Dev tools: run Python tests, compile-check, git status / diff
+- File tools: list, tree, glob, read (with line numbers; full / range / many),
+  search (regex, optional file-type filter), write, patch, move, delete
+- Dev tools: run Python tests, compile-check, git status / diff / log
 - Live web fetch (JSON-aware, with optional model-distilled answers)
+- Persistent memory: the agent keeps notes about you (global) and each project
+  (project), loaded automatically every session
+- Session recall: search past conversations and read any session in full
 - Terminal command execution with an approval safety layer
 - Sessions saved per project, manual `/compact`, slash commands
 - Works on whatever folder you launch it in (like a real code agent)
@@ -52,6 +55,19 @@ The agent works on that folder. Its state (sessions, logs) is stored in a
 
 Slash commands: `/help`, `/status`, `/tools`, `/mode`, `/sessions`, `/compact`,
 `/clear`, `/exit`. Press `Ctrl+C` to interrupt a running turn.
+
+## Memory
+
+The agent maintains its own long-term memory, loaded into context every session:
+
+- Global memory (`~/.simpleagent/memory.md`) — durable facts about you, shared
+  across all projects
+- Project memory (`<project>/.simpleagent/memory.md`) — knowledge about the
+  current project
+
+It updates these itself when it learns something lasting, and keeps them
+concise. To recall details from earlier conversations, it can search past
+sessions and read any one in full.
 
 ## Run from source (for development)
 
