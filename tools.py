@@ -2,6 +2,7 @@ import re
 import html
 import json
 import time
+import functools
 import urllib.parse
 import urllib.request
 import subprocess
@@ -136,12 +137,12 @@ def web_fetch(url: str, prompt: str = "") -> str:
     parsed = urllib.parse.urlparse(url)
 
     if parsed.scheme != "https":
-        return "ERROR: Only http and https URLs are allowed."
+        return "ERROR: HTTPS URLs are required."
 
-    host = parsed.hostname or ""
+    host = (parsed.hostname or "").lower()
 
     if any(host.startswith(prefix) for prefix in BLOCKED_FETCH_HOSTS):
-        return "ERROR: Fetching local or private addresses is not allowed."
+        return "ERROR: Fetching local or private network addresses is not allowed."
 
     cache_key = (url, prompt)
     now = time.time()
@@ -262,280 +263,268 @@ def is_ignored_path(path: Path) -> bool:
     return any(part in SKIPPED_TREE_DIRS for part in path.parts)
 
 
+def tool(func):
+    # Every tool returns a string; any unexpected error becomes an "ERROR: ..." string
+    # instead of crashing the agent. Tools still return explicit "ERROR:" for known cases.
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as error:
+            return f"ERROR: {error}"
+
+    return wrapper
+
+
+def resolve_existing_path(path: str) -> Path:
+    target_path = resolve_project_path(path)
+
+    if not target_path.exists():
+        raise ValueError("Path does not exist.")
+
+    return target_path
+
+
+def resolve_existing_file(path: str) -> Path:
+    target_path = resolve_existing_path(path)
+
+    if not target_path.is_file():
+        raise ValueError("Path is not a file.")
+
+    return target_path
+
+
+def resolve_existing_dir(path: str) -> Path:
+    target_path = resolve_existing_path(path)
+
+    if not target_path.is_dir():
+        raise ValueError("Path is not a folder.")
+
+    return target_path
+
+
+@tool
 def list_files(path: str = ".") -> str:
-    try:
-        target_path = resolve_project_path(path)
+    target_path = resolve_existing_dir(path)
 
-        if not target_path.exists():
-            return "ERROR: Path does not exist."
+    items = []
 
-        if not target_path.is_dir():
-            return "ERROR: Path is not a folder."
+    for item in sorted(target_path.iterdir()):
+        marker = "[DIR]" if item.is_dir() else "[FILE]"
+        items.append(f"{marker} {item.name}")
 
-        items = []
+    if not items:
+        return "Folder is empty."
 
-        for item in sorted(target_path.iterdir()):
-            if item.is_dir():
-                items.append(f"[DIR] {item.name}")
-            else:
-                items.append(f"[FILE] {item.name}")
-
-        if not items:
-            return "Folder is empty."
-
-        return "\n".join(items)
-
-    except Exception as error:
-        return f"ERROR: {error}"
+    return "\n".join(items)
 
 
+@tool
 def read_file(path: str) -> str:
-    try:
-        target_path = resolve_project_path(path)
+    target_path = resolve_existing_file(path)
 
-        if not target_path.exists():
-            return "ERROR: File does not exist."
-        if not target_path.is_file():
-            return "ERROR: Path is not a file."
+    content = target_path.read_text(encoding="utf-8")
+    numbered = "\n".join(
+        f"{line_number}: {line}"
+        for line_number, line in enumerate(content.splitlines(), start=1)
+    )
 
-        content = target_path.read_text(encoding="utf-8")
-        numbered = "\n".join(
-            f"{line_number}: {line}"
-            for line_number, line in enumerate(content.splitlines(), start=1)
+    return shorten_output(numbered)
+
+
+@tool
+def read_file_range(path: str, start_line: int, end_line: int) -> str:
+    target_path = resolve_existing_file(path)
+
+    if start_line < 1 or end_line < 1:
+        return "ERROR: Line numbers must be positive."
+    if start_line > end_line:
+        return "ERROR: start_line must be less than or equal to end_line."
+
+    requested_count = end_line - start_line + 1
+    if requested_count > MAX_READ_RANGE_LINES:
+        end_line = start_line + MAX_READ_RANGE_LINES - 1
+
+    lines = target_path.read_text(encoding="utf-8").splitlines()
+    total_lines = len(lines)
+
+    if start_line > total_lines:
+        return f"ERROR: start_line is past the end of the file ({total_lines} lines)."
+
+    actual_end_line = min(end_line, total_lines)
+    selected_lines = lines[start_line - 1:actual_end_line]
+    numbered_lines = [
+        f"{line_number}: {line}"
+        for line_number, line in enumerate(selected_lines, start=start_line)
+    ]
+
+    header = f"Showing lines {start_line}-{actual_end_line} of {total_lines} in {path}:"
+
+    return shorten_output(header + "\n" + "\n".join(numbered_lines))
+
+
+@tool
+def get_file_info(path: str) -> str:
+    target_path = resolve_existing_path(path)
+
+    stat = target_path.stat()
+    modified = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")
+
+    if target_path.is_file():
+        try:
+            line_count = len(target_path.read_text(encoding="utf-8").splitlines())
+        except UnicodeDecodeError:
+            line_count = "unavailable"
+
+        return (
+            f"Path: {path}\n"
+            "Type: file\n"
+            f"Lines: {line_count}\n"
+            f"Size: {stat.st_size} bytes\n"
+            f"Modified: {modified}"
         )
 
-        return shorten_output(numbered)
+    if target_path.is_dir():
+        item_count = sum(1 for _ in target_path.iterdir())
+        return (
+            f"Path: {path}\n"
+            "Type: folder\n"
+            f"Items: {item_count}\n"
+            f"Modified: {modified}"
+        )
 
-    except Exception as error:
-        return f"ERROR: {error}"
-
-
-def read_file_range(path: str, start_line: int, end_line: int) -> str:
-    try:
-        target_path = resolve_project_path(path)
-
-        if not target_path.exists():
-            return "ERROR: File does not exist."
-        if not target_path.is_file():
-            return "ERROR: Path is not a file."
-        if start_line < 1 or end_line < 1:
-            return "ERROR: Line numbers must be positive."
-        if start_line > end_line:
-            return "ERROR: start_line must be less than or equal to end_line."
-
-        requested_count = end_line - start_line + 1
-        if requested_count > MAX_READ_RANGE_LINES:
-            end_line = start_line + MAX_READ_RANGE_LINES - 1
-
-        lines = target_path.read_text(encoding="utf-8").splitlines()
-        total_lines = len(lines)
-
-        if start_line > total_lines:
-            return f"ERROR: start_line is past the end of the file ({total_lines} lines)."
-
-        actual_end_line = min(end_line, total_lines)
-        selected_lines = lines[start_line - 1:actual_end_line]
-        numbered_lines = [
-            f"{line_number}: {line}"
-            for line_number, line in enumerate(selected_lines, start=start_line)
-        ]
-
-        header = f"Showing lines {start_line}-{actual_end_line} of {total_lines} in {path}:"
-
-        return shorten_output(header + "\n" + "\n".join(numbered_lines))
-
-    except Exception as error:
-        return f"ERROR: {error}"
+    return f"Path: {path}\nType: other\nModified: {modified}"
 
 
-def get_file_info(path: str) -> str:
-    try:
-        target_path = resolve_project_path(path)
-
-        if not target_path.exists():
-            return "ERROR: Path does not exist."
-
-        stat = target_path.stat()
-        modified = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")
-
-        if target_path.is_file():
-            try:
-                line_count = len(target_path.read_text(encoding="utf-8").splitlines())
-            except UnicodeDecodeError:
-                line_count = "unavailable"
-
-            return (
-                f"Path: {path}\n"
-                "Type: file\n"
-                f"Lines: {line_count}\n"
-                f"Size: {stat.st_size} bytes\n"
-                f"Modified: {modified}"
-            )
-
-        if target_path.is_dir():
-            item_count = sum(1 for _ in target_path.iterdir())
-            return (
-                f"Path: {path}\n"
-                "Type: folder\n"
-                f"Items: {item_count}\n"
-                f"Modified: {modified}"
-            )
-
-        return f"Path: {path}\nType: other\nModified: {modified}"
-
-    except Exception as error:
-        return f"ERROR: {error}"
-
-
+@tool
 def read_many_files(paths: list[str]) -> str:
-    try:
-        if not paths:
-            return "ERROR: No file paths provided."
-        if len(paths) > MAX_READ_MANY_FILES:
-            return f"ERROR: read_many_files accepts at most {MAX_READ_MANY_FILES} files."
+    if not paths:
+        return "ERROR: No file paths provided."
+    if len(paths) > MAX_READ_MANY_FILES:
+        return f"ERROR: read_many_files accepts at most {MAX_READ_MANY_FILES} files."
 
-        sections = []
+    sections = []
 
-        for path in paths:
-            target_path = resolve_project_path(path)
-
-            if not target_path.exists():
-                sections.append(f"FILE: {path}\nERROR: File does not exist.")
-                continue
-            if not target_path.is_file():
-                sections.append(f"FILE: {path}\nERROR: Path is not a file.")
-                continue
-
-            try:
-                content = target_path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                sections.append(f"FILE: {path}\nERROR: File is not valid UTF-8 text.")
-                continue
-
-            sections.append(f"FILE: {path}\n{shorten_file_content(content)}")
-
-        return shorten_output("\n\n---\n\n".join(sections))
-
-    except Exception as error:
-        return f"ERROR: {error}"
-
-
-def list_project_tree(path: str = ".", max_depth: int = 2) -> str:
-    try:
+    for path in paths:
         target_path = resolve_project_path(path)
 
         if not target_path.exists():
-            return "ERROR: Path does not exist."
-        if not target_path.is_dir():
-            return "ERROR: Path is not a folder."
+            sections.append(f"FILE: {path}\nERROR: File does not exist.")
+            continue
+        if not target_path.is_file():
+            sections.append(f"FILE: {path}\nERROR: Path is not a file.")
+            continue
 
-        max_depth = max(0, min(int(max_depth), MAX_TREE_DEPTH))
-        lines = [path]
-        item_count = 0
+        try:
+            content = target_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            sections.append(f"FILE: {path}\nERROR: File is not valid UTF-8 text.")
+            continue
 
-        def walk(folder: Path, depth: int) -> None:
-            nonlocal item_count
+        sections.append(f"FILE: {path}\n{shorten_file_content(content)}")
 
-            if depth >= max_depth or item_count >= MAX_TREE_ITEMS:
+    return shorten_output("\n\n---\n\n".join(sections))
+
+
+@tool
+def list_project_tree(path: str = ".", max_depth: int = 2) -> str:
+    target_path = resolve_existing_dir(path)
+
+    max_depth = max(0, min(int(max_depth), MAX_TREE_DEPTH))
+    lines = [path]
+    item_count = 0
+
+    def walk(folder: Path, depth: int) -> None:
+        nonlocal item_count
+
+        if depth >= max_depth or item_count >= MAX_TREE_ITEMS:
+            return
+
+        items = sorted(
+            folder.iterdir(),
+            key=lambda item: (not item.is_dir(), item.name.lower()),
+        )
+
+        for item in items:
+            if item_count >= MAX_TREE_ITEMS:
+                lines.append("[Output truncated]")
                 return
+            if item.is_dir() and item.name in SKIPPED_TREE_DIRS:
+                continue
 
-            items = sorted(
-                folder.iterdir(),
-                key=lambda item: (not item.is_dir(), item.name.lower()),
-            )
+            marker = "[DIR]" if item.is_dir() else "[FILE]"
+            indent = "  " * (depth + 1)
+            lines.append(f"{indent}{marker} {item.name}")
+            item_count += 1
 
-            for item in items:
-                if item_count >= MAX_TREE_ITEMS:
-                    lines.append("[Output truncated]")
-                    return
-                if item.is_dir() and item.name in SKIPPED_TREE_DIRS:
-                    continue
+            if item.is_dir():
+                walk(item, depth + 1)
 
-                marker = "[DIR]" if item.is_dir() else "[FILE]"
-                indent = "  " * (depth + 1)
-                lines.append(f"{indent}{marker} {item.name}")
-                item_count += 1
+    walk(target_path, 0)
 
-                if item.is_dir():
-                    walk(item, depth + 1)
-
-        walk(target_path, 0)
-
-        return shorten_output("\n".join(lines))
-
-    except Exception as error:
-        return f"ERROR: {error}"
+    return shorten_output("\n".join(lines))
 
 
+@tool
 def write_file(path: str, content: str) -> str:
-    try:
-        target_path = resolve_project_path(path)
+    target_path = resolve_project_path(path)
 
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(content, encoding="utf-8")
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(content, encoding="utf-8")
 
-        return f"SUCCESS: Wrote file {path}"
-
-    except Exception as error:
-        return f"ERROR: {error}"
+    return f"SUCCESS: Wrote file {path}"
 
 
+@tool
 def search_files(pattern: str, path: str = ".", file_glob: str = "") -> str:
     try:
         regex = re.compile(pattern, re.IGNORECASE)
     except re.error as error:
         return f"ERROR: Invalid search pattern: {error}"
 
-    try:
-        target_path = resolve_project_path(path)
+    target_path = resolve_existing_path(path)
 
-        if not target_path.exists():
-            return "ERROR: Path does not exist."
+    glob_pattern = file_glob or "*"
+    matches = []
+    truncated = False
 
-        glob_pattern = file_glob or "*"
-        matches = []
-        truncated = False
-
-        for file_path in target_path.rglob(glob_pattern):
-            if truncated:
-                break
-
-            if not file_path.is_file():
-                continue
-
-            if is_ignored_path(file_path):
-                continue
-
-            try:
-                content = file_path.read_text(encoding="utf-8")
-
-            except UnicodeDecodeError:
-                continue
-
-            for line_number, line in enumerate(content.splitlines(), start=1):
-                if regex.search(line):
-                    relative_path = file_path.relative_to(PROJECT_ROOT)
-                    matches.append(f"{relative_path}:{line_number}: {line}")
-
-                    if len(matches) >= MAX_SEARCH_MATCHES:
-                        truncated = True
-                        break
-
-        if not matches:
-            return "No matches found."
-
-        result = "\n".join(matches)
-
+    for file_path in target_path.rglob(glob_pattern):
         if truncated:
-            result += (
-                f"\n\n[Stopped at {MAX_SEARCH_MATCHES} matches. "
-                "Narrow the pattern or use file_glob to scope the search.]"
-            )
+            break
 
-        return shorten_output(result)
+        if not file_path.is_file():
+            continue
 
-    except Exception as error:
-        return f"ERROR: {error}"
+        if is_ignored_path(file_path):
+            continue
+
+        try:
+            content = file_path.read_text(encoding="utf-8")
+
+        except UnicodeDecodeError:
+            continue
+
+        for line_number, line in enumerate(content.splitlines(), start=1):
+            if regex.search(line):
+                relative_path = file_path.relative_to(PROJECT_ROOT)
+                matches.append(f"{relative_path}:{line_number}: {line}")
+
+                if len(matches) >= MAX_SEARCH_MATCHES:
+                    truncated = True
+                    break
+
+    if not matches:
+        return "No matches found."
+
+    result = "\n".join(matches)
+
+    if truncated:
+        result += (
+            f"\n\n[Stopped at {MAX_SEARCH_MATCHES} matches. "
+            "Narrow the pattern or use file_glob to scope the search.]"
+        )
+
+    return shorten_output(result)
 
 
 def ask_for_approval(command: str, reason: str) -> bool:
@@ -575,111 +564,88 @@ def log_tool_call(tool_name: str, arguments: str, result: str) -> None:
         log_file.write(log_entry)
 
 
+@tool
 def glob_files(pattern: str, path: str = ".") -> str:
-    try:
-        target_path = resolve_project_path(path)
+    target_path = resolve_existing_path(path)
 
-        if not target_path.exists():
-            return "ERROR: Path does not exist."
+    matches = []
 
-        matches = []
+    for file_path in target_path.rglob(pattern):
+        if is_ignored_path(file_path):
+            continue
 
-        for file_path in target_path.rglob(pattern):
-            if is_ignored_path(file_path):
-                continue
+        relative_path = file_path.relative_to(PROJECT_ROOT)
+        matches.append(str(relative_path))
 
-            relative_path = file_path.relative_to(PROJECT_ROOT)
-            matches.append(str(relative_path))
+    if not matches:
+        return "No matching files found."
 
-        if not matches:
-            return "No matching files found."
-
-        return shorten_output("\n".join(sorted(matches)))
-
-    except Exception as error:
-        return f"ERROR: {error}"
+    return shorten_output("\n".join(sorted(matches)))
 
 
+@tool
 def apply_patch(path: str, replacements: list[dict[str, str]]) -> str:
-    try:
-        target_path = resolve_project_path(path)
+    target_path = resolve_existing_file(path)
 
-        if not target_path.exists():
-            return "ERROR: File does not exist."
+    content = target_path.read_text(encoding="utf-8")
+    updated_content = content
+    changes_made = 0
 
-        if not target_path.is_file():
-            return "ERROR: Path is not a file."
+    for replacement in replacements:
+        old_text = replacement.get("old_text", "")
+        new_text = replacement.get("new_text", "")
 
-        content = target_path.read_text(encoding="utf-8")
-        updated_content = content
-        changes_made = 0
+        if not old_text:
+            return "ERROR: Each replacement must include old_text."
 
-        for replacement in replacements:
-            old_text = replacement.get("old_text", "")
-            new_text = replacement.get("new_text", "")
+        occurrences = updated_content.count(old_text)
 
-            if not old_text:
-                return "ERROR: Each replacement must include old_text."
+        if occurrences == 0:
+            return f"ERROR: old_text not found: {old_text[:80]}"
 
-            occurrences = updated_content.count(old_text)
+        if occurrences > 1:
+            return (
+                f"ERROR: old_text found {occurrences} times, must be unique. "
+                f"Add more surrounding lines to make it unique: {old_text[:80]}"
+            )
 
-            if occurrences == 0:
-                return f"ERROR: old_text not found: {old_text[:80]}"
-            
-            if occurrences > 1:
-                return (
-                    f"ERROR: old_text found {occurrences} times, must be unique. "
-                    f"Add more surrounding lines to make it unique: {old_text[:80]}"
-                )
+        updated_content = updated_content.replace(old_text, new_text, 1)
+        changes_made += 1
 
-            updated_content = updated_content.replace(old_text, new_text, 1)
-            changes_made += 1
+    target_path.write_text(updated_content, encoding="utf-8")
 
-        target_path.write_text(updated_content, encoding="utf-8")
+    return f"SUCCESS: Applied {changes_made} replacement(s) to {path}"
 
-        return f"SUCCESS: Applied {changes_made} replacement(s) to {path}"
-
-    except Exception as error:
-        return f"ERROR: {error}"
-
+@tool
 def delete_file(path: str) -> str:
-    try: 
-        target_path = resolve_project_path(path)
+    target_path = resolve_existing_path(path)
 
-        if not target_path.exists():
-            return "ERROR: File does not exist."
+    if target_path.is_dir():
+        return "ERROR: delete_file only deletes files, not folders."
 
-        if target_path.is_dir():
-            return "ERROR: delete_file only deletes files, not folders."
-        
-        target_path.unlink()
+    target_path.unlink()
 
-        return f"SUCCESS: Deleted file {path}"
+    return f"SUCCESS: Deleted file {path}"
 
-    except Exception as error:
-        return f"ERROR: {error}"
 
-def move_file(source: str, destination: str) -> str: 
-    try:
-        source_path = resolve_project_path(source)
-        destination_path = resolve_project_path(destination)
+@tool
+def move_file(source: str, destination: str) -> str:
+    source_path = resolve_project_path(source)
+    destination_path = resolve_project_path(destination)
 
-        if not source_path.exists():
-            return "ERROR: Source file does not exist."
+    if not source_path.exists():
+        return "ERROR: Source file does not exist."
 
-        if not source_path.is_file():
-            return "ERROR: move_file only moves files, not folders."
+    if not source_path.is_file():
+        return "ERROR: move_file only moves files, not folders."
 
-        if destination_path.exists():
-            return "ERROR: Destination already exists."
-        
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
-        source_path.rename(destination_path)
+    if destination_path.exists():
+        return "ERROR: Destination already exists."
 
-        return f"SUCCESS: Moved {source} to {destination}"
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.rename(destination_path)
 
-    except Exception as error: 
-        return f"ERROR: {error}"
+    return f"SUCCESS: Moved {source} to {destination}"
 
 
 
@@ -760,6 +726,7 @@ def read_project_memory() -> str:
     return ""
 
 
+@tool
 def update_global_memory(content: str) -> str:
     if len(content) > GLOBAL_MEMORY_MAX_CHARS:
         return (
@@ -768,14 +735,12 @@ def update_global_memory(content: str) -> str:
             "important durable facts about the user."
         )
 
-    try:
-        GLOBAL_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-        GLOBAL_MEMORY_FILE.write_text(content, encoding="utf-8")
-        return f"SUCCESS: Global memory updated ({len(content)} characters)."
-    except Exception as error:
-        return f"ERROR: {error}"
+    GLOBAL_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    GLOBAL_MEMORY_FILE.write_text(content, encoding="utf-8")
+    return f"SUCCESS: Global memory updated ({len(content)} characters)."
 
 
+@tool
 def update_project_memory(content: str) -> str:
     if len(content) > PROJECT_MEMORY_MAX_CHARS:
         return (
@@ -784,12 +749,9 @@ def update_project_memory(content: str) -> str:
             "important durable knowledge about this project."
         )
 
-    try:
-        PROJECT_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        PROJECT_MEMORY_FILE.write_text(content, encoding="utf-8")
-        return f"SUCCESS: Project memory updated ({len(content)} characters)."
-    except Exception as error:
-        return f"ERROR: {error}"
+    PROJECT_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PROJECT_MEMORY_FILE.write_text(content, encoding="utf-8")
+    return f"SUCCESS: Project memory updated ({len(content)} characters)."
 
 
 def skill_filename(name: str) -> str:
@@ -833,6 +795,15 @@ def list_skills_index() -> str:
     return "\n".join(entries)
 
 
+def list_skills() -> str:
+    index = list_skills_index().strip()
+
+    if not index:
+        return "No saved skills yet."
+
+    return "Saved skills:\n" + index
+
+
 def read_skill(name: str) -> str:
     slug = skill_filename(name)
 
@@ -844,6 +815,7 @@ def read_skill(name: str) -> str:
     return f"ERROR: Skill not found: {name}"
 
 
+@tool
 def save_skill(name: str, description: str, content: str, scope: str = "project") -> str:
     if scope not in ("project", "global"):
         return "ERROR: scope must be 'project' or 'global'."
@@ -861,26 +833,21 @@ def save_skill(name: str, description: str, content: str, scope: str = "project"
             f"(this one is {len(document)}). Make the procedure more concise."
         )
 
-    try:
-        folder = GLOBAL_SKILLS_DIR if scope == "global" else PROJECT_SKILLS_DIR
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / f"{slug}.md").write_text(document, encoding="utf-8")
-        return f"SUCCESS: Saved {scope} skill '{slug}' ({len(document)} characters)."
-    except Exception as error:
-        return f"ERROR: {error}"
+    folder = GLOBAL_SKILLS_DIR if scope == "global" else PROJECT_SKILLS_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{slug}.md").write_text(document, encoding="utf-8")
+    return f"SUCCESS: Saved {scope} skill '{slug}' ({len(document)} characters)."
 
 
+@tool
 def delete_skill(name: str) -> str:
     slug = skill_filename(name)
 
     for scope, folder in (("project", PROJECT_SKILLS_DIR), ("global", GLOBAL_SKILLS_DIR)):
         skill_file = folder / f"{slug}.md"
         if skill_file.exists():
-            try:
-                skill_file.unlink()
-                return f"SUCCESS: Deleted {scope} skill '{slug}'."
-            except Exception as error:
-                return f"ERROR: {error}"
+            skill_file.unlink()
+            return f"SUCCESS: Deleted {scope} skill '{slug}'."
 
     return f"ERROR: Skill not found: {name}"
 
@@ -894,17 +861,23 @@ def search_sessions(query: str) -> str:
     if not SESSIONS_DIR.exists():
         return "No saved sessions yet."
 
-    session_files = sorted(SESSIONS_DIR.glob("*.json"), reverse=True)
-    matches = []
+    session_records = []
 
-    for session_file in session_files:
-        if len(matches) >= MAX_SESSION_MATCHES:
-            break
-
+    for session_file in SESSIONS_DIR.glob("*.json"):
         try:
             data = json.loads(session_file.read_text(encoding="utf-8"))
         except Exception:
             continue
+
+        sort_key = str(data.get("updated_at") or session_file.stem)
+        session_records.append((sort_key, session_file.stem, session_file, data))
+
+    session_records.sort(key=lambda record: (record[0], record[1]), reverse=True)
+    matches = []
+
+    for _sort_key, _session_stem, session_file, data in session_records:
+        if len(matches) >= MAX_SESSION_MATCHES:
+            break
 
         name = data.get("name", session_file.stem)
         updated_at = data.get("updated_at", "unknown")
@@ -942,6 +915,7 @@ def search_sessions(query: str) -> str:
     return shorten_output(header + "\n" + "\n".join(matches))
 
 
+@tool
 def read_session(name: str) -> str:
     session_name = name[:-5] if name.endswith(".json") else name
     session_path = SESSIONS_DIR / f"{session_name}.json"
@@ -949,10 +923,7 @@ def read_session(name: str) -> str:
     if not session_path.exists():
         return f"ERROR: Session not found: {session_name}"
 
-    try:
-        data = json.loads(session_path.read_text(encoding="utf-8"))
-    except Exception as error:
-        return f"ERROR: {error}"
+    data = json.loads(session_path.read_text(encoding="utf-8"))
 
     lines = [
         f"Session: {data.get('name', session_name)} "

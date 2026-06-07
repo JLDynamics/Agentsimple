@@ -107,6 +107,21 @@ stay token-cheap. After a non-trivial task the agent saves a skill, improves
 existing skills when they were helpful but incomplete, and deletes skills that
 become outdated — so it gets faster and more consistent the more you use it.
 
+## Project structure
+
+| File | Role |
+|---|---|
+| `main.py` | Entry point, CLI parsing, REPL loop, slash commands |
+| `agent.py` | Agent step loop: tool execution and compaction |
+| `llm.py` | LLM client: streaming and plain responses |
+| `prompt.py` | System prompt builder |
+| `config.py` | Settings, tool registry, context window helpers |
+| `sessions.py` | Session save/load/list/export |
+| `tools.py` | All tool implementations (file, dev, web, memory, skills) |
+| `tools_schema.json` | Tool definitions sent to the model |
+| `safety.py` | Terminal command approval logic |
+| `ui.py` | Rich terminal UI: console, printing, slash-command views |
+
 ## Run from source (for development)
 
 ```

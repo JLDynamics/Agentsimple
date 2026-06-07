@@ -8,6 +8,27 @@ from unittest.mock import patch
 import tools
 
 
+class FakeHeaders:
+    def get_content_type(self):
+        return "text/plain"
+
+    def get_content_charset(self):
+        return "utf-8"
+
+
+class FakeWebResponse:
+    headers = FakeHeaders()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def read(self, max_bytes):
+        return b"hello from web"
+
+
 class ToolsBehaviorTests(unittest.TestCase):
     def setUp(self):
         self.test_file = Path("tmp_read_range_test.txt")
@@ -151,6 +172,32 @@ class ToolsBehaviorTests(unittest.TestCase):
         self.assertEqual(command, ["git", "diff", "--", "main.py"])
         self.assertIn("SUCCESS", result)
         self.assertIn("diff output", result)
+
+    def test_web_fetch_rejects_non_https_scheme_with_clear_message(self):
+        result = tools.web_fetch("ftp://example.com/data")
+
+        self.assertIn("ERROR", result)
+        self.assertIn("HTTPS URLs are required", result)
+
+    def test_web_fetch_blocks_localhost_case_insensitively(self):
+        result = tools.web_fetch("https://LOCALHOST/status")
+
+        self.assertIn("ERROR", result)
+        self.assertIn("local or private", result)
+
+    def test_web_fetch_upgrades_http_to_https_before_request(self):
+        seen = {}
+        tools.WEB_FETCH_CACHE.clear()
+
+        def fake_urlopen(request, timeout):
+            seen["url"] = request.full_url
+            return FakeWebResponse()
+
+        with patch("tools.urllib.request.urlopen", side_effect=fake_urlopen):
+            result = tools.web_fetch("http://example.com/data")
+
+        self.assertEqual(seen["url"], "https://example.com/data")
+        self.assertIn("hello from web", result)
 
     def test_execute_terminal_command_ask_mode_requests_approval(self):
         with patch("tools.ask_for_approval", return_value=False) as fake_approval:
@@ -347,6 +394,79 @@ class ToolsBehaviorTests(unittest.TestCase):
         self.assertIn("session-20260601-101010", result)
         self.assertIn("work plan", result)
 
+    def test_search_sessions_orders_matches_by_updated_at(self):
+        sessions_dir = Path("tmp_sessions_search_order")
+        self.addCleanup(lambda: shutil.rmtree(sessions_dir, ignore_errors=True))
+        sessions_dir.mkdir(exist_ok=True)
+
+        older_file = sessions_dir / "session-z.json"
+        newer_file = sessions_dir / "session-a.json"
+
+        older_file.write_text(
+            json.dumps(
+                {
+                    "name": "session-z",
+                    "updated_at": "2026-01-01T10:00:00",
+                    "messages": [
+                        {"role": "user", "content": "needle from older session"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        newer_file.write_text(
+            json.dumps(
+                {
+                    "name": "session-a",
+                    "updated_at": "2026-01-02T10:00:00",
+                    "messages": [
+                        {"role": "user", "content": "needle from newer session"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.object(tools, "SESSIONS_DIR", sessions_dir):
+            result = tools.search_sessions("needle")
+
+        self.assertLess(result.index("session-a"), result.index("session-z"))
+
+    def test_search_sessions_orders_timestamp_ties_by_name(self):
+        sessions_dir = Path("tmp_sessions_search_tie")
+        self.addCleanup(lambda: shutil.rmtree(sessions_dir, ignore_errors=True))
+        sessions_dir.mkdir(exist_ok=True)
+
+        (sessions_dir / "session-a.json").write_text(
+            json.dumps(
+                {
+                    "name": "session-a",
+                    "updated_at": "2026-01-02T10:00:00",
+                    "messages": [
+                        {"role": "user", "content": "needle from a session"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (sessions_dir / "session-b.json").write_text(
+            json.dumps(
+                {
+                    "name": "session-b",
+                    "updated_at": "2026-01-02T10:00:00",
+                    "messages": [
+                        {"role": "user", "content": "needle from b session"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.object(tools, "SESSIONS_DIR", sessions_dir):
+            result = tools.search_sessions("needle")
+
+        self.assertLess(result.index("session-b"), result.index("session-a"))
+
     def test_search_sessions_reports_invalid_regex(self):
         with patch.object(tools, "SESSIONS_DIR", Path("tmp_sessions_missing")):
             result = tools.search_sessions("work (plan")
@@ -458,11 +578,26 @@ class ToolsBehaviorTests(unittest.TestCase):
             )
             loaded = tools.read_skill("add-a-tool")
             index = tools.list_skills_index()
+            listed = tools.list_skills()
 
         self.assertIn("SUCCESS", saved)
         self.assertIn("Step 1. write the function", loaded)
         self.assertIn("add-a-tool", index)
         self.assertIn("How to add a tool", index)
+        self.assertIn("Saved skills", listed)
+        self.assertIn("add-a-tool [project]", listed)
+
+    def test_list_skills_handles_empty_index(self):
+        proj = Path("tmp_skills_empty_proj")
+        glob = Path("tmp_skills_empty_glob")
+        self.addCleanup(lambda: shutil.rmtree(proj, ignore_errors=True))
+        self.addCleanup(lambda: shutil.rmtree(glob, ignore_errors=True))
+
+        with patch.object(tools, "PROJECT_SKILLS_DIR", proj), \
+                patch.object(tools, "GLOBAL_SKILLS_DIR", glob):
+            listed = tools.list_skills()
+
+        self.assertEqual(listed, "No saved skills yet.")
 
     def test_save_skill_rejects_over_cap(self):
         proj = Path("tmp_skills_cap")
