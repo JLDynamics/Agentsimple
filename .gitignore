@@ -1,5 +1,6 @@
 # Agent workspace state (sessions, logs, future memory)
 .simpleagent/
+.worktrees/
 
 # Python-generated files
 sessions/
