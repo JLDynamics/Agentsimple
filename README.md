@@ -9,7 +9,8 @@ a safety layer for terminal commands. Bring your own model API key.
 - File tools: list, tree, glob, read (with line numbers; full / range / many),
   search (regex, optional file-type filter), write, patch, move, delete
 - Dev tools: run Python tests, compile-check, git status / diff / log
-- Live web fetch (JSON-aware, with optional model-distilled answers)
+- Live web fetch (JSON-aware, with model-distilled answers on full page content)
+- Connection safety: API client requests include a 30-second timeout to prevent infinite freezes
 - Persistent memory: the agent keeps notes about you (global) and each project
   (project), loaded automatically every session
 - Self-growing skills: the agent writes and improves its own reusable runbooks,

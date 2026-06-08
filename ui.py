@@ -188,7 +188,7 @@ def show_help() -> None:
     print("/memory - Show what the agent remembers (global and project)")
     print("/skills - List the skills the agent has saved")
     print("/help - Show this help message")
-    print("/mode    Switch approval mode (ask / safe_auto / full_auto)")
+    print("/mode    Switch approval mode (safe_auto / full_auto)")
     print("/rewind [n] - Undo the last n turns (default 1)")
     print("/clear - Clear conversation memory")
     print("exit - Quit the program")
@@ -237,15 +237,14 @@ def rewind_conversation(messages: list[dict], count: int) -> int:
 
 
 def choose_mode(config: dict) -> None:
-    modes = ["ask", "safe_auto", "full_auto"]
+    modes = ["safe_auto", "full_auto"]
     current_mode = config.get("approval_mode", "safe_auto")
 
     print()
     print(f"Current approval mode: {current_mode}")
     print()
-    print("1. ask        always ask before any terminal command")
-    print("2. safe_auto  auto-allow safe commands, ask for risky ones")
-    print("3. full_auto  allow all commands automatically")
+    print("1. safe_auto  auto-allow safe commands, ask for risky ones")
+    print("2. full_auto  allow all commands automatically")
     print()
 
     choice = input("Enter number (or press Enter to keep current): ").strip()
@@ -256,7 +255,7 @@ def choose_mode(config: dict) -> None:
         print()
         return
 
-    if choice not in ("1", "2", "3"):
+    if choice not in ("1", "2"):
         print()
         print("Invalid choice. Mode unchanged.")
         print()
@@ -271,9 +270,3 @@ def choose_mode(config: dict) -> None:
         print()
         print(f"Mode changed for this run only: {selected_mode}")
         print(f"Could not save agent_config.json: {error}")
-        print()
-        return
-
-    print()
-    print(f"Mode changed to: {selected_mode}")
-    print()

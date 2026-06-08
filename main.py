@@ -16,7 +16,7 @@ from sessions import (
     resume_session_picker,
     save_session,
 )
-from tools import set_llm
+from tools import set_llm, set_current_intent
 from ui import (
     choose_mode,
     clear_conversation,
@@ -45,6 +45,7 @@ def main():
     client = OpenAI(
         api_key=api_key,
         base_url=config["base_url"],
+        timeout=30.0,
     )
 
     set_llm(client, model_name)
@@ -132,6 +133,7 @@ def main():
             continue
 
         refresh_system_message(messages)
+        set_current_intent(user_input)
         turn_start_index = len(messages)
 
         messages.append(

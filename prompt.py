@@ -2,6 +2,21 @@
 
 import tools
 
+from pathlib import Path
+
+_cache: dict = {
+    "content": None, 
+    "global_mtime": None,
+    "project_mtime": None,
+    "skills_mtime": None,
+    "project_skills_mtime": None,
+}
+
+def _get_mtime(path: Path) -> float | None: 
+    try: 
+        return path.stat().st_mtime
+    except FileNotFoundError:
+        return None
 
 def build_system_prompt() -> str:
     return (
@@ -55,6 +70,7 @@ def build_system_prompt() -> str:
         "You keep your own long-term memory across sessions. Use update_global_memory for durable facts about the user (preferences, goals, how they work) and update_project_memory for durable knowledge about the current project (architecture, decisions, conventions, gotchas). "
         "Maintain them yourself: whenever you learn something lasting and important, save it without being asked, and keep each memory concise and curated. Do not store secrets or trivial one-off details. "
         "Actively prune stale memory: when a fact becomes outdated or wrong, rewrite the memory without it so it stays accurate. "
+        "Important: update_global_memory and update_project_memory overwrite the entire file. Always include all existing facts you want to keep when writing — never write a partial update. "
         "To recall something from an earlier conversation, use search_sessions to find matching past sessions, then read_session to read one in full.\n\n"
 
         "## Skills\n"
@@ -69,6 +85,21 @@ def build_system_prompt() -> str:
 
 
 def build_system_content() -> str:
+
+    global_mtime = _get_mtime(tools.GLOBAL_MEMORY_FILE)
+    project_mtime = _get_mtime(tools.PROJECT_MEMORY_FILE)
+    skills_mtime = _get_mtime(tools.GLOBAL_SKILLS_DIR)
+    project_skills_mtime = _get_mtime(tools.PROJECT_SKILLS_DIR)
+
+    if (
+        _cache["content"] is not None
+        and _cache["global_mtime"] == global_mtime
+        and _cache["project_mtime"] == project_mtime
+        and _cache["skills_mtime"] == skills_mtime
+        and _cache["project_skills_mtime"] == project_skills_mtime
+    ):
+        return _cache["content"]
+    
     content = build_system_prompt()
 
     global_memory = tools.read_global_memory().strip()
@@ -87,6 +118,12 @@ def build_system_content() -> str:
             "\n\nSkills you have saved (call read_skill with the name to load the full steps):\n"
             + skills_index
         )
+
+    _cache["content"] = content
+    _cache["global_mtime"] = global_mtime
+    _cache["project_mtime"] = project_mtime
+    _cache["skills_mtime"] = skills_mtime
+    _cache["project_skills_mtime"] = project_skills_mtime
 
     return content
 
