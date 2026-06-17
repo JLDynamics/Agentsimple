@@ -174,6 +174,9 @@ def decide_command(command: str, approval_mode: str ="safe_auto", intent: str = 
     for phrase in BLOCK_IF_CONTAINS:
         if phrase in lowered_command:
             return CommandDecision("block", f"Dangerous command pattern: {phrase}")
+
+    if approval_mode == "full_auto":
+        return CommandDecision("allow", "Full auto approval mode.")
         
     if pipe_is_safe(lowered_command):
         return CommandDecision("allow", "Safe pipe between read-only commands.")
@@ -186,9 +189,6 @@ def decide_command(command: str, approval_mode: str ="safe_auto", intent: str = 
             return CommandDecision(
                 "ask", f"Command may change files or system state: {phrase}"
             )
-
-    if approval_mode == "full_auto":
-        return CommandDecision("allow", "Full auto approval mode.")
 
     if starts_with_any(lowered_command, AUTO_ALLOW_PREFIXES):
         return CommandDecision("allow", "Known read-only command.")
