@@ -49,7 +49,7 @@ def run_agent_events(client, model_name, messages, max_agent_steps, approval_mod
                 
                 decision = decide_command(command, approval_mode, intent=intent)
 
-                if decision.action =="ask":
+                if decision.action == "approval_required":
                     answer = yield {
                         "type": "approval_request",
                         "command": command,

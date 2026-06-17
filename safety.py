@@ -30,7 +30,7 @@ AUTO_ALLOW_PREFIXES = [
 ]
 
 
-ASK_IF_CONTAINS = [
+APPROVAL_REQUIRED_IF_CONTAINS = [
     ">>",
     " >",
     "|",
@@ -184,13 +184,13 @@ def decide_command(command: str, approval_mode: str ="safe_auto", intent: str = 
     if intent_permits(lowered_command, intent):
         return CommandDecision("allow", f"Permitted by user intent.")
     
-    for phrase in ASK_IF_CONTAINS:
+    for phrase in APPROVAL_REQUIRED_IF_CONTAINS:
         if phrase in lowered_command:
             return CommandDecision(
-                "ask", f"Command may change files or system state: {phrase}"
+                "approval_required", f"Command may change files or system state: {phrase}"
             )
 
     if starts_with_any(lowered_command, AUTO_ALLOW_PREFIXES):
         return CommandDecision("allow", "Known read-only command.")
 
-    return CommandDecision("ask", "Unknown command. Approval required.")
+    return CommandDecision("approval_required", "Unknown command. Approval required.")
