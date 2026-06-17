@@ -19,6 +19,8 @@ a safety layer for terminal commands. Bring your own model API key.
 - Terminal command execution with an approval safety layer
 - Rich terminal UI: welcome banner, a "thinking" spinner, and markdown-rendered
   replies
+- Three frontends, one core: terminal REPL, browser chat UI (Chainlit), and a
+  native desktop app (PySide6/Qt) with Light / Dark / System themes
 - Sessions saved per project, manual `/compact`, `/rewind`, slash commands
 - Works on whatever folder you launch it in (like a real code agent)
 
@@ -76,6 +78,55 @@ Slash commands: `/help`, `/status`, `/tools`, `/memory`, `/skills`, `/mode`,
 `/sessions`, `/compact`, `/rewind [n]`, `/clear`, `/exit`. Press `Ctrl+C` to
 interrupt a running turn.
 
+## Interfaces
+
+The agent's core logic is decoupled from its display: `agent_events.py` runs the
+step loop and *yields events* (assistant messages, tool calls, approval
+requests), and each frontend renders those events its own way. Three are
+included, all sharing the same agent, tools, sessions, memory, and approval
+safety layer.
+
+**Terminal (default)** — the rich REPL described above:
+
+```
+simpleagent              # if installed as a tool
+uv run python main.py    # from source
+```
+
+**Browser chat UI (Chainlit)** — a local web app, opened in your browser:
+
+```
+uv add chainlit markdown
+uv run chainlit run chainlit_app.py -w
+```
+
+**Native desktop app (PySide6/Qt)** — a real window, no browser and no local
+server, with an Appearance menu for Light / Dark / System themes:
+
+```
+uv add pyside6 markdown
+uv run python qt_app.py
+```
+
+In the GUIs, tool calls render as compact one-line entries (`read_file(path) ·
+45 lines`) that expand on click, and terminal-command approvals appear as
+in-window Allow / Deny prompts.
+
+## Build a standalone desktop app
+
+Either GUI can be packaged into a double-clickable Windows app with
+[PyInstaller](https://pyinstaller.org/) using the included spec files:
+
+```
+uv add pyinstaller
+uv run pyinstaller SimpleAgentNative.spec --noconfirm   # native Qt app (recommended)
+uv run pyinstaller SimpleAgent.spec --noconfirm         # Chainlit web app
+```
+
+The build lands in `dist/`. The spec files keep `console=True` for first-build
+debugging — flip it to `False` for a windowless app. Note: the bundle includes
+`.env`, so don't share the `dist/` folder.
+
 ## Sessions
 
 Sessions are saved per project in `.simpleagent/sessions/`. Use `/sessions` to
@@ -122,6 +173,11 @@ become outdated — so it gets faster and more consistent the more you use it.
 | `tools_schema.json` | Tool definitions sent to the model |
 | `safety.py` | Terminal command approval logic |
 | `ui.py` | Rich terminal UI: console, printing, slash-command views |
+| `agent_events.py` | Frontend-agnostic event stream shared by the GUIs |
+| `chainlit_app.py` | Browser chat frontend (Chainlit) |
+| `qt_app.py` | Native desktop frontend (PySide6/Qt) with themes |
+| `desktop.py` | Wraps the Chainlit app in a native window (pywebview) |
+| `SimpleAgentNative.spec` / `SimpleAgent.spec` | PyInstaller build recipes |
 
 ## Run from source (for development)
 

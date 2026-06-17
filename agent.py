@@ -1,4 +1,4 @@
-"""The agent's brain: running tools, planning, the step loop, and compaction."""
+"""The agent's brain: running tools, the step loop, and compaction."""
 
 import json
 
@@ -69,109 +69,6 @@ def create_assistant_message(
     return assistant_record
 
 
-def normalize_turn_plan(plan: str) -> str:
-    plan = plan.strip()
-
-    if not plan or plan.upper() == "SKIP_PLAN":
-        return ""
-
-    return plan
-
-
-def create_turn_plan(
-    client,
-    model_name,
-    messages: list[dict],
-    stream_messages: bool,
-) -> str:
-    planning_instruction = {
-        "role": "system",
-        "content": (
-            "Before tools are available, decide whether this user turn needs a plan. "
-            "If the user is asking a quick question that can be answered directly, "
-            "reply exactly SKIP_PLAN. Otherwise write 2 to 4 short sentences explaining "
-            "what you will check, why, and how you will verify the result. Do not call "
-            "tools because tools are not available in this planning step."
-        ),
-    }
-
-    try:
-        with console.status("Planning...", spinner="dots"):
-            assistant_record = complete(
-                client, model_name, messages + [planning_instruction], stream_messages
-            )
-            plan = assistant_record["content"]
-
-    except Exception:
-        return ""
-
-    plan = normalize_turn_plan(plan)
-
-    if plan:
-        print_agent_markdown(plan)
-
-    return plan
-
-
-def maybe_create_turn_plan(
-    client,
-    model_name,
-    messages: list[dict],
-    config: dict,
-) -> None:
-    if not config.get("plan_before_tools"):
-        return
-
-    plan = create_turn_plan(
-        client,
-        model_name,
-        messages,
-        bool(config["stream_messages"]),
-    )
-
-    if plan:
-        messages.append(
-            {
-                "role": "assistant",
-                "content": plan,
-            }
-        )
-
-
-def create_tool_result_summary(
-    client,
-    model_name,
-    messages: list[dict],
-    stream_messages: bool,
-) -> str:
-    summary_instruction = {
-        "role": "system",
-        "content": (
-            "Briefly summarize what the latest tool results showed and what that means "
-            "for the next step. Use 1 to 3 short sentences. Do not call tools. "
-            "Do not give a final answer unless the task is clearly complete from the "
-            "tool results."
-        ),
-    }
-
-    try:
-        with console.status("Reading tool results...", spinner="dots"):
-            assistant_record = complete(
-                client, model_name, messages + [summary_instruction], stream_messages
-            )
-            summary = assistant_record["content"]
-
-    except Exception as error:
-        return f"Tool result summary failed: {error}"
-
-    summary = summary.strip()
-
-    if summary:
-        print_agent_markdown(summary)
-
-    return summary
-
-
 # Tool calls are always dicts by the time they reach here (llm.py normalizes them).
 def get_tool_call_name(tool_call) -> str:
     return tool_call["function"]["name"]
@@ -183,43 +80,6 @@ def get_tool_call_arguments(tool_call) -> str:
 
 def get_tool_call_id(tool_call) -> str:
     return tool_call["id"]
-
-
-# Argument keys we show after a tool name, in priority order, to hint what it acts on.
-TOOL_DETAIL_KEYS = ("path", "paths", "source", "command", "pattern", "query", "name", "test_path")
-
-
-def describe_tool_calls(tool_calls) -> str:
-    parts = []
-
-    for tool_call in tool_calls:
-        name = get_tool_call_name(tool_call)
-        try:
-            arguments = json.loads(get_tool_call_arguments(tool_call))
-        except json.JSONDecodeError:
-            arguments = {}
-
-        detail = next((arguments[key] for key in TOOL_DETAIL_KEYS if arguments.get(key)), "")
-        if isinstance(detail, list):
-            detail = ", ".join(str(item) for item in detail)
-
-        parts.append(f"{name}: {detail}" if detail else name)
-
-    if not parts:
-        return "I will use tools to continue checking this."
-
-    return "I will use " + "; ".join(parts) + "."
-
-
-def print_tool_activity_status(tool_calls) -> None:
-    status = describe_tool_calls(tool_calls)
-
-    if status.startswith("I will "):
-        status = status.removeprefix("I will ")
-
-    print()
-    print(f"Working: {status}")
-    print()
 
 
 def assistant_record_for_history(assistant_record: dict) -> dict:
@@ -239,10 +99,9 @@ def run_agent_loop(
     model_name,
     messages,
     max_agent_steps: int,
-    tool_display: str,
     stream_messages: bool,
     approval_mode: str,
-    summarize_tool_results: bool,
+    show_tool_calls: bool,
 ):
     for step_number in range(1, max_agent_steps + 1):
         assistant_record = create_assistant_message(
@@ -253,9 +112,6 @@ def run_agent_loop(
         )
 
         tool_calls = assistant_record["tool_calls"] or []
-
-        if tool_calls and tool_display == "summary":
-            print_tool_activity_status(tool_calls)
 
         if not tool_calls:
             messages.append(
@@ -272,7 +128,7 @@ def run_agent_loop(
             tool_result = run_tool(
                 get_tool_call_name(tool_call),
                 get_tool_call_arguments(tool_call),
-                tool_display == "verbose",
+                show_tool_calls,
                 approval_mode,
             )
 
@@ -283,22 +139,6 @@ def run_agent_loop(
                     "content": tool_result,
                 }
             )
-
-        if summarize_tool_results:
-            summary = create_tool_result_summary(
-                client,
-                model_name,
-                messages,
-                stream_messages,
-            )
-
-            if summary:
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": summary,
-                    }
-                )
 
     stop_message = f"Stopped because max_agent_steps ({max_agent_steps}) was reached."
 

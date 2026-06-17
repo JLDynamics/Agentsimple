@@ -16,7 +16,6 @@ from config import (
     context_health_warning,
     estimate_message_tokens,
     get_context_window_tokens,
-    get_tool_display,
     save_config,
 )
 
@@ -96,7 +95,6 @@ def show_status(model_name: str, messages: list[dict], config: dict) -> None:
     print(f"Max agent steps: {config['max_agent_steps']}")
     print(f"Show tool calls: {config['show_tool_calls']}")
     print(f"Stream messages: {config['stream_messages']}")
-    print(f"Tool display: {get_tool_display(config)}")
     print(f"Approval mode: {config['approval_mode']}")
     print(f"Project: {os.getcwd()}")
     print(f"Messages in memory: {len(messages)}")

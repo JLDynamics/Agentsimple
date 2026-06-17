@@ -1,6 +1,7 @@
 import re
 import html
 import json
+import os
 import time
 import functools
 import urllib.parse
@@ -16,10 +17,10 @@ from safety import decide_command
 # instead of being locked to where its own code lives.
 PROJECT_ROOT = Path.cwd()
 AGENT_DIR = PROJECT_ROOT / ".simpleagent"
-MAX_OUTPUT_CHARS = 4000
+MAX_OUTPUT_CHARS = 12000
 MAX_READ_RANGE_LINES = 250
 MAX_READ_MANY_FILES = 8
-MAX_READ_MANY_CHARS_PER_FILE = 1500
+MAX_READ_MANY_CHARS_PER_FILE = 4000
 MAX_TREE_DEPTH = 5
 MAX_TREE_ITEMS = 200
 MAX_SEARCH_MATCHES = 100
@@ -111,6 +112,15 @@ def extract_with_model(content: str, prompt: str) -> str:
         return f"[Extraction failed: {error}]\n\n{content}"
 
 def strip_html(text: str) -> str:
+    try:
+        import trafilatura
+
+        extracted = trafilatura.extract(text, output_format="markdown")
+        if extracted:
+            return extracted
+    except ImportError:
+        pass
+
     text = re.sub(r"(?is)<script.*?</script>", " ", text)
     text = re.sub(r"(?is)<style.*?</style>", " ", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
@@ -198,6 +208,119 @@ def web_fetch(url: str, prompt: str = "") -> str:
     WEB_FETCH_CACHE[cache_key] = (now, result)
 
     return result
+
+
+def web_search(
+    query: str,
+    max_results: int = 5,
+    timelimit: str = "",
+    search_type: str = "text",
+    search_depth: str = "basic",
+    include_domains: list[str] | None = None,
+    exact_match: bool = False,
+) -> str:
+    """Search the web or news using Tavily.
+
+    Args:
+        query: The search query.
+        max_results: Maximum number of results to return (1-10).
+        timelimit: Time filter: 'd' (day), 'w' (week), 'm' (month), 'y' (year),
+            or empty for no limit. For news, defaults to 'd' if not provided.
+        search_type: 'text' for general web search, 'news' for news/current events.
+        search_depth: 'basic' (1 credit, fast), 'advanced' (2 credits, more relevant),
+            'fast' or 'ultra-fast' for lower latency.
+        include_domains: Optional list of domains to prioritize (e.g. ['python.org',
+            'github.com']). Useful for official docs or trusted sources.
+        exact_match: If True, only return results containing the exact quoted
+            phrase(s) in the query.
+
+    Returns:
+        A formatted string of search results, or an error message.
+    """
+    try:
+        from tavily import TavilyClient
+    except ImportError:
+        return "ERROR: tavily-python is not installed. Run 'uv add tavily-python'."
+
+    api_key = os.getenv("TAVILY_API_KEY")
+    if not api_key:
+        return "ERROR: TAVILY_API_KEY not found in .env file."
+
+    try:
+        max_results = max(1, min(int(max_results), 10))
+        search_type = search_type.lower()
+        search_depth = search_depth.lower()
+
+        if search_type not in {"text", "news"}:
+            return "ERROR: search_type must be 'text' or 'news'."
+
+        if search_depth not in {"basic", "advanced", "fast", "ultra-fast"}:
+            return "ERROR: search_depth must be 'basic', 'advanced', 'fast', or 'ultra-fast'."
+
+        time_map = {"d": "day", "w": "week", "m": "month", "y": "year"}
+
+        if search_type == "news" and not timelimit:
+            timelimit = "d"
+
+        search_kwargs: dict[str, object] = {
+            "query": query,
+            "max_results": max_results,
+            "search_depth": search_depth,
+            "include_answer": True,
+            "topic": "news" if search_type == "news" else "general",
+            "exact_match": bool(exact_match),
+        }
+
+        if timelimit and timelimit.lower() in time_map:
+            search_kwargs["time_range"] = time_map[timelimit.lower()]
+
+        if include_domains:
+            domains = [d.strip() for d in include_domains if isinstance(d, str) and d.strip()]
+            if domains:
+                search_kwargs["include_domains"] = domains
+
+        if search_depth == "advanced":
+            search_kwargs["chunks_per_source"] = 3
+
+        client = TavilyClient(api_key=api_key)
+        response = client.search(**search_kwargs)
+
+        results = response.get("results", [])
+        if not results:
+            return "No search results found."
+
+        lines = []
+
+        answer = response.get("answer")
+        if answer:
+            lines.append(f"Summary: {answer}")
+            lines.append("")
+
+        for index, result in enumerate(results, start=1):
+            title = result.get("title", "No title")
+            url = result.get("url", "No URL")
+            content = result.get("content", "No snippet")
+            published = result.get("published_date", "")
+            source = result.get("source", "")
+
+            if search_type == "news" and published:
+                lines.append(
+                    f"{index}. {title}\n"
+                    f"   Source: {source} | Date: {published}\n"
+                    f"   URL: {url}\n"
+                    f"   {content}"
+                )
+            else:
+                lines.append(
+                    f"{index}. {title}\n"
+                    f"   URL: {url}\n"
+                    f"   {content}"
+                )
+
+        return "\n\n".join(lines)
+
+    except Exception as error:
+        return f"ERROR: Search failed: {error}"
 
 
 def shorten_output(text: str) -> str:
@@ -531,9 +654,9 @@ def search_files(pattern: str, path: str = ".", file_glob: str = "") -> str:
 
 
 def _session_stem(command: str) -> str:
-    from safety import ASK_IF_CONTAINS
+    from safety import APPROVAL_REQUIRED_IF_CONTAINS
     lowered = " ".join(command.lower().split())
-    for phrase in ASK_IF_CONTAINS:
+    for phrase in APPROVAL_REQUIRED_IF_CONTAINS:
         if phrase in lowered:
             return phrase
     return command
@@ -988,7 +1111,7 @@ def execute_terminal_command(command: str, approval_mode: str = "safe_auto") -> 
     if decision.action == "block":
         return f"BLOCKED: {decision.reason}"
 
-    if decision.action == "ask":
+    if decision.action == "approval_required":
         approved = ask_for_approval(command, decision.reason)
 
         if not approved:

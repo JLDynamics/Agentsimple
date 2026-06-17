@@ -78,14 +78,8 @@ class MainBehaviorTests(unittest.TestCase):
     def test_default_config_enables_streaming_messages(self):
         self.assertTrue(config.DEFAULT_CONFIG["stream_messages"])
 
-    def test_default_config_skips_planning_for_efficiency(self):
-        self.assertFalse(config.DEFAULT_CONFIG["plan_before_tools"])
-
-    def test_default_config_skips_tool_result_summary_for_efficiency(self):
-        self.assertFalse(config.DEFAULT_CONFIG["summarize_tool_results"])
-
-    def test_default_config_uses_summary_tool_display(self):
-        self.assertEqual(config.DEFAULT_CONFIG["tool_display"], "summary")
+    def test_default_config_hides_tool_calls_by_default(self):
+        self.assertFalse(config.DEFAULT_CONFIG["show_tool_calls"])
 
     def test_default_config_uses_safe_auto_approval_mode(self):
         self.assertEqual(config.DEFAULT_CONFIG["approval_mode"], "safe_auto")
@@ -181,21 +175,21 @@ class MainBehaviorTests(unittest.TestCase):
 
     def test_choose_mode_persists_selected_mode(self):
         runtime_config = config.DEFAULT_CONFIG.copy()
-        runtime_config["approval_mode"] = "ask"
+        runtime_config["approval_mode"] = "safe_auto"
 
         with patch("builtins.input", return_value="2"), \
                 patch("ui.save_config") as fake_save:
             with redirect_stdout(io.StringIO()):
                 ui.choose_mode(runtime_config)
 
-        self.assertEqual(runtime_config["approval_mode"], "safe_auto")
+        self.assertEqual(runtime_config["approval_mode"], "full_auto")
         fake_save.assert_called_once_with(runtime_config)
 
     def test_choose_mode_handles_save_failure_without_crashing(self):
         runtime_config = config.DEFAULT_CONFIG.copy()
-        runtime_config["approval_mode"] = "ask"
+        runtime_config["approval_mode"] = "safe_auto"
 
-        with patch("builtins.input", return_value="3"), \
+        with patch("builtins.input", return_value="2"), \
                 patch("ui.save_config", side_effect=OSError("disk full")):
             buffer = io.StringIO()
             with redirect_stdout(buffer):
@@ -249,7 +243,7 @@ class MainBehaviorTests(unittest.TestCase):
             result = agent.run_tool(
                 "execute_terminal_command",
                 json.dumps({"command": "python --version"}),
-                approval_mode="ask",
+                approval_mode="full_auto",
             )
 
         finally:
@@ -257,21 +251,21 @@ class MainBehaviorTests(unittest.TestCase):
 
         self.assertEqual(result, "SUCCESS")
         self.assertEqual(calls["command"], "python --version")
-        self.assertEqual(calls["approval_mode"], "ask")
+        self.assertEqual(calls["approval_mode"], "full_auto")
 
-    def test_system_prompt_asks_for_natural_plan(self):
+    def test_system_prompt_prioritizes_execution_discipline(self):
         system_prompt = prompt.build_system_prompt().lower()
 
-        self.assertIn("plan", system_prompt)
-        self.assertIn("natural", system_prompt)
+        self.assertIn("execution discipline", system_prompt)
+        self.assertIn("do not add a separate visible plan", system_prompt)
+        self.assertIn("use tools promptly", system_prompt)
         self.assertIn("root cause", system_prompt)
+        self.assertIn("verify", system_prompt)
         self.assertIn("do not reveal raw internal chain-of-thought", system_prompt)
-        self.assertIn("workflow discipline", system_prompt)
         self.assertIn("read_skill", system_prompt)
         self.assertIn("list_skills", system_prompt)
-        self.assertIn("debugging", system_prompt)
-        self.assertIn("plan-a-feature", system_prompt)
-        self.assertIn("running narration is required", system_prompt)
+        self.assertNotIn("running narration is required", system_prompt)
+        self.assertNotIn("plan-a-feature", system_prompt)
 
     def test_refresh_system_message_updates_current_skills(self):
         messages = [
@@ -313,75 +307,6 @@ class MainBehaviorTests(unittest.TestCase):
 
         for text in examples:
             self.assertFalse(ui.is_skill_question(text), text)
-
-    def test_describe_tool_calls_mentions_files_and_folders(self):
-        note = agent.describe_tool_calls(
-            [
-                make_tool_call("list_files", {"path": "."}),
-                make_tool_call("read_file", {"path": "main.py"}),
-                make_tool_call("read_file", {"path": "tools.py"}),
-            ]
-        )
-
-        self.assertIn("list_files: .", note)
-        self.assertIn("read_file: main.py", note)
-        self.assertIn("read_file: tools.py", note)
-
-    def test_describe_tool_calls_mentions_file_ranges(self):
-        note = agent.describe_tool_calls(
-            [
-                make_tool_call(
-                    "read_file_range",
-                    {
-                        "path": "main.py",
-                        "start_line": 200,
-                        "end_line": 300,
-                    },
-                ),
-            ]
-        )
-
-        self.assertIn("read_file_range: main.py", note)
-
-    def test_describe_tool_calls_mentions_direct_coding_tools(self):
-        note = agent.describe_tool_calls(
-            [
-                make_tool_call("list_project_tree", {"path": ".", "max_depth": 2}),
-                make_tool_call("read_many_files", {"paths": ["main.py", "tools.py"]}),
-                make_tool_call("run_python_tests", {"test_path": "test_main_behavior.py"}),
-                make_tool_call("git_status", {}),
-            ]
-        )
-
-        self.assertIn("list_project_tree: .", note)
-        self.assertIn("read_many_files: main.py, tools.py", note)
-        self.assertIn("run_python_tests: test_main_behavior.py", note)
-        self.assertIn("git_status", note)
-
-    def test_describe_tool_calls_mentions_skill_listing(self):
-        note = agent.describe_tool_calls(
-            [
-                make_tool_call("list_skills", {}),
-            ]
-        )
-
-        self.assertIn("list_skills", note)
-
-    def test_print_tool_activity_status_shows_working_summary(self):
-        output = io.StringIO()
-
-        with redirect_stdout(output):
-            agent.print_tool_activity_status(
-                [
-                    make_tool_call("list_files", {"path": "."}),
-                    make_tool_call("read_file", {"path": "main.py"}),
-                ]
-            )
-
-        text = output.getvalue()
-        self.assertIn("Working:", text)
-        self.assertIn("list_files: .", text)
-        self.assertIn("read_file: main.py", text)
 
     def test_collect_streamed_assistant_message_collects_content(self):
         message = llm.collect_streamed_assistant_message(
@@ -498,131 +423,7 @@ class MainBehaviorTests(unittest.TestCase):
         self.assertIn("Hello", output)
         self.assertIn("world", output)
 
-    def test_normalize_turn_plan_skips_marker(self):
-        self.assertEqual(agent.normalize_turn_plan("SKIP_PLAN"), "")
-        self.assertEqual(agent.normalize_turn_plan("  skip_plan  "), "")
-        self.assertEqual(agent.normalize_turn_plan("I will inspect the files."), "I will inspect the files.")
-
-    def test_create_turn_plan_uses_no_tools(self):
-        calls = {}
-
-        def fake_create(**kwargs):
-            calls.update(kwargs)
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(
-                            content="I will inspect the project structure first."
-                        )
-                    )
-                ]
-            )
-
-        client = SimpleNamespace(
-            chat=SimpleNamespace(
-                completions=SimpleNamespace(create=fake_create)
-            )
-        )
-
-        with redirect_stdout(io.StringIO()):
-            plan = agent.create_turn_plan(
-                client,
-                "test-model",
-                [{"role": "user", "content": "explain this project"}],
-                False,
-            )
-
-        self.assertEqual(plan, "I will inspect the project structure first.")
-        self.assertNotIn("tools", calls)
-        self.assertEqual(calls["model"], "test-model")
-        self.assertEqual(calls["messages"][-1]["role"], "system")
-        self.assertIn("Before tools are available", calls["messages"][-1]["content"])
-
-    def test_maybe_create_turn_plan_appends_plan(self):
-        messages = [
-            {"role": "system", "content": "system"},
-            {"role": "user", "content": "explain the project"},
-        ]
-
-        with patch(
-            "agent.create_turn_plan",
-            return_value="I will inspect the structure, then summarize the workflow.",
-        ):
-            agent.maybe_create_turn_plan(
-                None,
-                "test-model",
-                messages,
-                {
-                    "plan_before_tools": True,
-                    "stream_messages": False,
-                },
-            )
-
-        self.assertEqual(messages[-1]["role"], "assistant")
-        self.assertEqual(
-            messages[-1]["content"],
-            "I will inspect the structure, then summarize the workflow.",
-        )
-
-    def test_maybe_create_turn_plan_can_be_disabled(self):
-        messages = [
-            {"role": "system", "content": "system"},
-            {"role": "user", "content": "explain the project"},
-        ]
-
-        with patch("agent.create_turn_plan") as create_turn_plan:
-            agent.maybe_create_turn_plan(
-                None,
-                "test-model",
-                messages,
-                {
-                    "plan_before_tools": False,
-                    "stream_messages": False,
-                },
-            )
-
-        create_turn_plan.assert_not_called()
-        self.assertEqual(messages[-1]["role"], "user")
-
-    def test_create_tool_result_summary_uses_no_tools(self):
-        calls = {}
-
-        def fake_create(**kwargs):
-            calls.update(kwargs)
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(
-                            content="I found that main.py contains the response loop."
-                        )
-                    )
-                ]
-            )
-
-        client = SimpleNamespace(
-            chat=SimpleNamespace(
-                completions=SimpleNamespace(create=fake_create)
-            )
-        )
-
-        with redirect_stdout(io.StringIO()):
-            summary = agent.create_tool_result_summary(
-                client,
-                "test-model",
-                [
-                    {"role": "user", "content": "check the loop"},
-                    {"role": "tool", "tool_call_id": "call_1", "content": "SUCCESS"},
-                ],
-                False,
-            )
-
-        self.assertEqual(summary, "I found that main.py contains the response loop.")
-        self.assertNotIn("tools", calls)
-        self.assertEqual(calls["model"], "test-model")
-        self.assertEqual(calls["messages"][-1]["role"], "system")
-        self.assertIn("latest tool results", calls["messages"][-1]["content"])
-
-    def test_run_agent_loop_adds_tool_result_summary_before_continuing(self):
+    def test_run_agent_loop_continues_after_tool_result_without_summary_message(self):
         messages = [
             {"role": "system", "content": "system"},
             {"role": "user", "content": "list files"},
@@ -650,20 +451,16 @@ class MainBehaviorTests(unittest.TestCase):
         with patch(
             "agent.create_assistant_message",
             side_effect=[first_assistant_record, final_assistant_record],
-        ), patch("agent.run_tool", return_value="SUCCESS:\n[FILE] main.py"), patch(
-            "agent.create_tool_result_summary",
-            return_value="I found main.py in the project root.",
-        ):
+        ), patch("agent.run_tool", return_value="SUCCESS:\n[FILE] main.py"):
             with redirect_stdout(io.StringIO()):
                 agent.run_agent_loop(
                     None,
                     "test-model",
                     messages,
                     3,
-                    "summary",
                     False,
                     "safe_auto",
-                    True,
+                    False,
                 )
 
         assistant_messages = [
@@ -672,7 +469,7 @@ class MainBehaviorTests(unittest.TestCase):
             if message["role"] == "assistant"
         ]
 
-        self.assertIn("I found main.py in the project root.", assistant_messages)
+        self.assertEqual(assistant_messages.count("The project contains main.py."), 1)
         self.assertEqual(messages[-1]["content"], "The project contains main.py.")
 
     def test_delete_session_file_removes_file(self):

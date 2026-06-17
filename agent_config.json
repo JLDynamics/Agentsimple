@@ -6,8 +6,5 @@
     "max_agent_steps": 20,
     "show_tool_calls": false,
     "stream_messages": true,
-    "tool_display": "summary",
-    "plan_before_tools": false,
-    "summarize_tool_results": false,
     "approval_mode": "safe_auto"
 }

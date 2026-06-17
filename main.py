@@ -6,8 +6,8 @@ import sys
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from agent import compact_conversation, maybe_create_turn_plan, run_agent_loop
-from config import AGENT_HOME, get_tool_display, load_config
+from agent import compact_conversation, run_agent_loop
+from config import AGENT_HOME, load_config
 from prompt import current_system_message, refresh_system_message
 from sessions import (
     choose_session,
@@ -144,22 +144,14 @@ def main():
         )
 
         try:
-            maybe_create_turn_plan(
-                client,
-                model_name,
-                messages,
-                config,
-            )
-
             run_agent_loop(
                 client,
                 model_name,
                 messages,
                 int(config["max_agent_steps"]),
-                get_tool_display(config),
                 bool(config["stream_messages"]),
                 str(config["approval_mode"]),
-                bool(config["summarize_tool_results"]),
+                bool(config["show_tool_calls"]),
             )
             save_session(current_session_name, model_name, messages)
             show_context_warning(messages, config)

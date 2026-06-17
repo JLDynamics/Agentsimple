@@ -199,12 +199,12 @@ class ToolsBehaviorTests(unittest.TestCase):
         self.assertEqual(seen["url"], "https://example.com/data")
         self.assertIn("hello from web", result)
 
-    def test_execute_terminal_command_ask_mode_requests_approval(self):
+    def test_execute_terminal_command_safe_auto_requests_approval_for_unknown_command(self):
         with patch("tools.ask_for_approval", return_value=False) as fake_approval:
             with patch("tools.subprocess.run") as fake_run:
                 result = tools.execute_terminal_command(
-                    "python --version",
-                    approval_mode="ask",
+                    "python custom_script.py",
+                    approval_mode="safe_auto",
                 )
 
         self.assertIn("CANCELLED", result)
@@ -630,7 +630,7 @@ class ToolsBehaviorTests(unittest.TestCase):
 
     def test_shorten_output_truncates_at_line_boundary(self):
         line = "x" * 100
-        text = "\n".join([line] * 60)
+        text = "\n".join([line] * 130)
 
         result = tools.shorten_output(text)
 

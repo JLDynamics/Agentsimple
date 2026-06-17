@@ -28,6 +28,7 @@ from tools import (
     update_global_memory,
     update_project_memory,
     web_fetch,
+    web_search,
     write_file,
 )
 
@@ -51,10 +52,6 @@ DEFAULT_CONFIG = {
     "show_tool_calls": False,
     "stream_messages": True,
     "context_warning_percent": 70,
-    "tool_display": "summary",
-    # Off by default to keep each turn to one LLM call. Enable for extra hand-holding.
-    "plan_before_tools": False,
-    "summarize_tool_results": False,
     "approval_mode": "safe_auto",
 }
 
@@ -82,6 +79,7 @@ AVAILABLE_TOOL = {
     "git_log": git_log,
     "execute_terminal_command": execute_terminal_command,
     "web_fetch": web_fetch,
+    "web_search": web_search,
     "update_global_memory": update_global_memory,
     "update_project_memory": update_project_memory,
     "search_sessions": search_sessions,
@@ -156,15 +154,3 @@ def context_health_warning(messages: list[dict], config: dict) -> str:
         f"Context is about {percent:.1f}% full. "
         "Consider /compact before starting a large task."
     )
-
-
-def get_tool_display(config: dict) -> str:
-    tool_display = str(config.get("tool_display", "")).strip().lower()
-
-    if tool_display in ("hidden", "summary", "verbose"):
-        return tool_display
-
-    if config.get("show_tool_calls"):
-        return "verbose"
-
-    return "summary"
