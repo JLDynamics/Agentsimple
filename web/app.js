@@ -457,11 +457,21 @@
 
   // ---- dispatcher ----
   // Public hook called from Python: window.__appendEvent(jsonString)
+  function resetTranscript() {
+    items.length = 0;
+    pendingAssistant = null;
+    pendingTool = null;
+    pendingReasoning = null;
+    // Clear reveal pacing state for GC; the WeakMap entries die with the DOM nodes.
+    while (root.firstChild) root.removeChild(root.firstChild);
+  }
+
   window.__appendEvent = function (jsonString) {
     let ev;
     try { ev = JSON.parse(jsonString); } catch { return; }
     const t = ev.type;
 
+    if (t === "reset") { resetTranscript(); return; }
     if (t === "user") { append({ kind: "user", el: renderUser(ev.text) }); return; }
     if (t === "error") { append({ kind: "error", el: renderError(ev.text) }); return; }
     if (t === "done") { renderDone(); return; }

@@ -1190,6 +1190,7 @@ class ChatWindow(QMainWindow):
         self._dirty = False
         if not self.using_web:
             self.render(scroll_to_end=True)
+        self.push_session_to_bridge()
         self.refresh_sessions()
         self.statusBar().showMessage("Started a new session")
 
@@ -1210,8 +1211,31 @@ class ChatWindow(QMainWindow):
             self.items = [{"kind": "agent", "text": "(This session has no messages yet.)"}]
         if not self.using_web:
             self.render(scroll_to_end=True)
+        self.push_session_to_bridge()
         self.refresh_sessions()
         self.statusBar().showMessage(f"Resumed session: {name}")
+
+    def push_session_to_bridge(self):
+        """Clear the web transcript and replay the current items (used by
+        new_session / resume_session / change-folder so the QWebEngineView
+        reflects the loaded conversation instead of staying frozen)."""
+        if not self.bridge:
+            return
+        self.bridge.push({"type": "reset"})
+        for item in self.items:
+            kind = item.get("kind")
+            if kind == "user":
+                self.bridge.push({"type": "user", "text": item.get("text", "")})
+            elif kind == "agent":
+                self.bridge.push({"type": "assistant_message", "content": item.get("text", ""), "streaming": False})
+            elif kind == "tool":
+                self.bridge.push({"type": "tool_start", "name": item.get("name", ""), "args": item.get("args", "")})
+                self.bridge.push({"type": "tool_result", "name": item.get("name", ""), "args": item.get("args", ""), "result": item.get("result", "")})
+            elif kind == "diff":
+                self.bridge.push({"type": "diff", "path": item.get("path", ""), "diff": item.get("diff", "")})
+            elif kind == "error":
+                self.bridge.push({"type": "error", "text": item.get("text", "")})
+            # 'reasoning' items are not replayed — they were ephemeral.
 
     def items_from_messages(self, messages):
         """Turn saved chat messages back into transcript items for display.
@@ -1426,6 +1450,7 @@ class ChatWindow(QMainWindow):
         self._dirty = False
         if not self.using_web:
             self.render(scroll_to_end=True)
+        self.push_session_to_bridge()
         self.refresh_sessions()
         self.statusBar().showMessage(f"Working directory: {chosen}")
 

@@ -189,5 +189,48 @@ class BridgePushContractTests(unittest.TestCase):
         self.assertEqual(decoded, {"type": "user", "text": "hi"})
 
 
+class SessionResetTests(unittest.TestCase):
+    """new_session / resume_session must push a 'reset' event then replay the
+    loaded messages so the QWebEngineView reflects the loaded conversation."""
+
+    def test_push_session_to_bridge_emits_reset_then_items(self):
+        from qt_app import WebBridge
+        from unittest.mock import patch, MagicMock
+
+        # Stand-in for a ChatWindow: only `bridge` and `items` are needed.
+        class Fake:
+            def __init__(self):
+                self.bridge = MagicMock(spec=WebBridge)
+                self.items = [
+                    {"kind": "user", "text": "hi"},
+                    {"kind": "agent", "text": "hello"},
+                    {"kind": "tool", "name": "editor", "args": "{}", "result": "ok"},
+                ]
+
+        from qt_app import ChatWindow
+
+        f = Fake()
+        ChatWindow.push_session_to_bridge(f)
+        calls = [c.args[0] for c in f.bridge.push.call_args_list]
+        # First event MUST be reset.
+        self.assertEqual(calls[0], {"type": "reset"})
+        # Then one event per non-reasoning item, in order.
+        self.assertEqual(calls[1], {"type": "user", "text": "hi"})
+        self.assertEqual(calls[2], {"type": "assistant_message", "content": "hello", "streaming": False})
+        # tool item expands into tool_start + tool_result.
+        self.assertEqual(calls[3], {"type": "tool_start", "name": "editor", "args": "{}"})
+        self.assertEqual(calls[4], {"type": "tool_result", "name": "editor", "args": "{}", "result": "ok"})
+
+    def test_push_session_to_bridge_noop_without_bridge(self):
+        from qt_app import ChatWindow
+        class Fake:
+            def __init__(self):
+                self.bridge = None
+                self.items = [{"kind": "user", "text": "hi"}]
+        f = Fake()
+        # Must not raise.
+        ChatWindow.push_session_to_bridge(f)
+
+
 if __name__ == "__main__":
     unittest.main()
