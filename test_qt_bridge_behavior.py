@@ -115,5 +115,45 @@ class StreamingParameterTests(unittest.TestCase):
         self.assertEqual(reasoning_events[0]["streaming"], False)
 
 
+from qt_app import serialize_event, diff_counts
+
+
+class SerializeEventTests(unittest.TestCase):
+    def test_user_event(self):
+        self.assertEqual(
+            serialize_event({"type": "user", "text": "hi"}),
+            json.dumps({"type": "user", "text": "hi"}),
+        )
+
+    def test_assistant_message_streaming(self):
+        out = json.loads(serialize_event({"type": "assistant_message", "content": "x", "streaming": True}))
+        self.assertTrue(out["streaming"])
+
+    def test_diff_includes_counts(self):
+        diff = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n+extra\n"
+        out = json.loads(serialize_event({
+            "type": "diff", "path": "foo.py", "diff": diff,
+        }))
+        self.assertEqual(out["added"], 2)
+        self.assertEqual(out["removed"], 1)
+        self.assertEqual(out["path"], "foo.py")
+
+    def test_theme_event(self):
+        out = json.loads(serialize_event({"type": "theme", "mode": "light"}))
+        self.assertEqual(out["mode"], "light")
+
+    def test_done_event(self):
+        self.assertEqual(serialize_event({"type": "done"}), json.dumps({"type": "done"}))
+
+
+class DiffCountsTests(unittest.TestCase):
+    def test_counts_skip_file_headers(self):
+        diff = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+        self.assertEqual(diff_counts(diff), (1, 1))
+
+    def test_empty(self):
+        self.assertEqual(diff_counts(""), (0, 0))
+
+
 if __name__ == "__main__":
     unittest.main()
