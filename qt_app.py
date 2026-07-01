@@ -1598,10 +1598,11 @@ class ChatWindow(QMainWindow):
             f"#central {{ background:{c['window_bg']}; border:1px solid {c['border']}; }}"
         )
 
-        self.transcript.setStyleSheet(
-            f"QTextBrowser {{ background:{c['surface']}; border:1px solid {c['border']};"
-            f" border-radius:10px; padding:20px; color:{c['text']}; }}"
-        )
+        if not self.using_web:
+            self.transcript.setStyleSheet(
+                f"QTextBrowser {{ background:{c['surface']}; border:1px solid {c['border']};"
+                f" border-radius:10px; padding:20px; color:{c['text']}; }}"
+            )
         self.input.setStyleSheet(
             f"QLineEdit {{ padding:10px 12px; border:1px solid {c['input_border']};"
             f" border-radius:8px; font-size:14px; background:{c['input_bg']}; color:{c['text']}; }}"
@@ -1614,7 +1615,8 @@ class ChatWindow(QMainWindow):
             f"QPushButton:disabled {{ background:{c['subtle']}; }}"
         )
 
-        self.transcript.document().setDefaultStyleSheet(self.transcript_css(c))
+        if not self.using_web:
+            self.transcript.document().setDefaultStyleSheet(self.transcript_css(c))
 
         # --- custom title bar ----------------------------------------------
         self.activity_bar.setStyleSheet(
@@ -1707,7 +1709,8 @@ class ChatWindow(QMainWindow):
 
         if self.bridge:
             self.bridge.push({"type": "theme", "mode": self.resolve_mode()})
-        self.render(scroll_to_end=False)
+        else:
+            self.render(scroll_to_end=False)
 
     # --- rendering ---------------------------------------------------------
 
