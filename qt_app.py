@@ -413,22 +413,32 @@ class AgentWorker(QThread):
             self.messages.append({"role": "user", "content": self.user_text})
             set_current_intent(self.user_text)
 
-            def on_assistant_chunk(accumulated):
-                self.assistantChunk.emit(accumulated)
+            if self.config.get("qt_streaming"):
+                def on_assistant_chunk(accumulated):
+                    self.assistantChunk.emit(accumulated)
 
-            def on_reasoning_chunk(accumulated):
-                self.reasoningChunk.emit(accumulated)
+                def on_reasoning_chunk(accumulated):
+                    self.reasoningChunk.emit(accumulated)
 
-            gen = run_agent_events(
-                self.client,
-                self.model,
-                self.messages,
-                int(self.config["max_agent_steps"]),
-                self.config["approval_mode"],
-                intent=self.user_text,
-                on_assistant_chunk=on_assistant_chunk,
-                on_reasoning_chunk=on_reasoning_chunk,
-            )
+                gen = run_agent_events(
+                    self.client,
+                    self.model,
+                    self.messages,
+                    int(self.config["max_agent_steps"]),
+                    self.config["approval_mode"],
+                    intent=self.user_text,
+                    on_assistant_chunk=on_assistant_chunk,
+                    on_reasoning_chunk=on_reasoning_chunk,
+                )
+            else:
+                gen = run_agent_events(
+                    self.client,
+                    self.model,
+                    self.messages,
+                    int(self.config["max_agent_steps"]),
+                    self.config["approval_mode"],
+                    intent=self.user_text,
+                )
 
             answer_to_send = None
             while True:

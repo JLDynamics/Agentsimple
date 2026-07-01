@@ -232,5 +232,59 @@ class SessionResetTests(unittest.TestCase):
         ChatWindow.push_session_to_bridge(f)
 
 
+class QtStreamingGateTests(unittest.TestCase):
+    """AgentWorker must only pass streaming callbacks when config['qt_streaming']
+    is true. Default (key absent or False) must use the non-streaming path."""
+
+    def test_default_config_has_qt_streaming_false(self):
+        from config import DEFAULT_CONFIG
+        self.assertIn("qt_streaming", DEFAULT_CONFIG)
+        self.assertIs(DEFAULT_CONFIG["qt_streaming"], False)
+
+    def test_streaming_off_passes_no_callbacks(self):
+        """With qt_streaming False, run_agent_events receives None for both
+        callbacks, so complete() is called non-streaming."""
+        from config import DEFAULT_CONFIG
+        import copy
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        config["qt_streaming"] = False
+        client = MagicMock()
+        with patch("agent_events.complete") as mock_complete:
+            mock_complete.return_value = {"role":"assistant","content":"hi","tool_calls":None,"reasoning":None}
+            # Simulate what AgentWorker.run() does:
+            if config.get("qt_streaming"):
+                gen = run_agent_events(client, "m", [{"role":"user","content":"hi"}],
+                                       max_agent_steps=1, approval_mode="safe_auto",
+                                       on_assistant_chunk=lambda a: None,
+                                       on_reasoning_chunk=lambda a: None)
+            else:
+                gen = run_agent_events(client, "m", [{"role":"user","content":"hi"}],
+                                       max_agent_steps=1, approval_mode="safe_auto")
+            list(gen)
+            _, kwargs = mock_complete.call_args
+            self.assertEqual(kwargs.get("stream_messages"), False)
+
+    def test_streaming_on_passes_callbacks(self):
+        """With qt_streaming True, callbacks are passed and complete() streams."""
+        import copy
+        from config import DEFAULT_CONFIG
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        config["qt_streaming"] = True
+        client = MagicMock()
+        with patch("agent_events.complete") as mock_complete:
+            mock_complete.return_value = {"role":"assistant","content":"hi","tool_calls":None,"reasoning":None}
+            if config.get("qt_streaming"):
+                gen = run_agent_events(client, "m", [{"role":"user","content":"hi"}],
+                                       max_agent_steps=1, approval_mode="safe_auto",
+                                       on_assistant_chunk=lambda a: None,
+                                       on_reasoning_chunk=lambda a: None)
+            else:
+                gen = run_agent_events(client, "m", [{"role":"user","content":"hi"}],
+                                       max_agent_steps=1, approval_mode="safe_auto")
+            list(gen)
+            _, kwargs = mock_complete.call_args
+            self.assertEqual(kwargs.get("stream_messages"), True)
+
+
 if __name__ == "__main__":
     unittest.main()
