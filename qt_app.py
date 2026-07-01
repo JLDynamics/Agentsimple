@@ -353,6 +353,8 @@ class AgentWorker(QThread):
     approvalRequested = Signal(str, str)   # command, reason
     questionRequested = Signal(str, list)  # question, options
     reasoningMessage = Signal(str)         # reasoning text
+    assistantChunk = Signal(str)          # accumulated assistant text so far
+    reasoningChunk = Signal(str)          # accumulated reasoning text so far
     failed = Signal(str)
 
     def __init__(self, client, model, messages, config, user_text):
@@ -403,6 +405,12 @@ class AgentWorker(QThread):
             self.messages.append({"role": "user", "content": self.user_text})
             set_current_intent(self.user_text)
 
+            def on_assistant_chunk(accumulated):
+                self.assistantChunk.emit(accumulated)
+
+            def on_reasoning_chunk(accumulated):
+                self.reasoningChunk.emit(accumulated)
+
             gen = run_agent_events(
                 self.client,
                 self.model,
@@ -410,6 +418,8 @@ class AgentWorker(QThread):
                 int(self.config["max_agent_steps"]),
                 self.config["approval_mode"],
                 intent=self.user_text,
+                on_assistant_chunk=on_assistant_chunk,
+                on_reasoning_chunk=on_reasoning_chunk,
             )
 
             answer_to_send = None
@@ -1840,6 +1850,14 @@ class ChatWindow(QMainWindow):
             self.items = [i for i in self.items if i.get("kind") != "reasoning"]
             self.add({"kind": "agent", "text": text})
 
+    def add_assistant_chunk(self, accumulated):
+        if self.bridge:
+            self.bridge.push({"type": "assistant_message", "content": accumulated, "streaming": True})
+
+    def add_reasoning_chunk(self, accumulated):
+        if self.bridge:
+            self.bridge.push({"type": "reasoning", "content": accumulated, "streaming": True})
+
     def add_tool(self, name, args, result):
         if self.bridge:
             self.bridge.push({"type": "tool_result", "name": name, "args": args, "result": result})
@@ -1890,6 +1908,8 @@ class ChatWindow(QMainWindow):
 
         self.worker = AgentWorker(self.client, self.model, self.messages, self.config, text)
         self.worker.assistantMessage.connect(self.add_agent)
+        self.worker.assistantChunk.connect(self.add_assistant_chunk)
+        self.worker.reasoningChunk.connect(self.add_reasoning_chunk)
         self.worker.toolStart.connect(self.add_tool_start)
         self.worker.toolResult.connect(self.add_tool)
         self.worker.fileDiff.connect(self.add_diff)
