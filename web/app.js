@@ -127,7 +127,7 @@
   // morphdom-patch the result into the live DOM node.
   function renderMarkdownInto(container, text, allowHighlight) {
     const html = mdToHtml(text);
-    const next = el("div", "", html);
+    const next = el("div", "md-content", html);
 
     // Decorate: wrap each <pre> in .markdown-code with a copy button (on the
     // detached `next` tree). We do NOT request highlighting here — morphdom
