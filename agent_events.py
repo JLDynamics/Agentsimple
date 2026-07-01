@@ -24,12 +24,12 @@ def run_agent_events(client, model_name, messages, max_agent_steps,
 
             def _chunk_cb(piece):
                 _acc_content.append(piece)
-                if on_assistant_chunk:
+                if on_assistant_chunk is not None:
                     on_assistant_chunk("".join(_acc_content))
 
             def _reasoning_cb(piece):
                 _acc_reasoning.append(piece)
-                if on_reasoning_chunk:
+                if on_reasoning_chunk is not None:
                     on_reasoning_chunk("".join(_acc_reasoning))
 
             assistant_record = complete(

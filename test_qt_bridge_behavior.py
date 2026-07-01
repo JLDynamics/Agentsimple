@@ -75,7 +75,44 @@ class StreamingParameterTests(unittest.TestCase):
         self.assertEqual(chunks_received, ["Hel", "Hello"])
         # The generator must still yield the final assistant_message with streaming=False.
         assistant_events = [e for e in events if e["type"] == "assistant_message"]
-        self.assertTrue(any(not e.get("streaming", False) for e in assistant_events))
+        self.assertEqual(assistant_events[-1]["streaming"], False)
+
+    def test_reasoning_chunk_callback_accumulates(self):
+        """on_reasoning_chunk receives accumulated reasoning text (not raw
+        deltas), and the generator yields exactly one reasoning event with
+        streaming=False as the final marker."""
+        client = MagicMock()
+        reasoning_received = []
+
+        def fake_complete(client, model_name, messages, stream_messages,
+                          tools=None, on_chunk=None, on_reasoning=None):
+            self.assertTrue(stream_messages)
+            on_reasoning("thin")
+            on_reasoning("king")
+            return {
+                "role": "assistant",
+                "content": "Hello",
+                "tool_calls": None,
+                "reasoning": "thinking",
+            }
+
+        def on_reasoning_chunk(accumulated):
+            reasoning_received.append(accumulated)
+
+        with patch("agent_events.complete", side_effect=fake_complete):
+            gen = run_agent_events(
+                client, "m", [{"role": "user", "content": "hi"}],
+                max_agent_steps=1, approval_mode="safe_auto",
+                on_reasoning_chunk=on_reasoning_chunk,
+            )
+            events = list(gen)
+
+        # Accumulated, not raw deltas.
+        self.assertEqual(reasoning_received, ["thin", "thinking"])
+        # Exactly one reasoning event, with streaming=False.
+        reasoning_events = [e for e in events if e["type"] == "reasoning"]
+        self.assertEqual(len(reasoning_events), 1)
+        self.assertEqual(reasoning_events[0]["streaming"], False)
 
 
 if __name__ == "__main__":
