@@ -80,6 +80,9 @@ from sessions import (
     format_relative_time,
 )
 
+# Folder of static web assets (sibling to this file).
+WEB_DIR = os.path.dirname(os.path.abspath(__file__))
+WEB_ASSETS = os.path.join(WEB_DIR, "web")
 
 # --- Markdown -> HTML, with a graceful fallback if the lib isn't installed ---
 try:
@@ -704,6 +707,8 @@ class ChatWindow(QMainWindow):
         self.messages = [current_system_message()]
         self.worker = None
         self.items = []
+        self.using_web = False
+        self.bridge = None
         # True once a message is sent in this session; only then does saving bump
         # its timestamp (so merely viewing a session doesn't reorder the list).
         self._dirty = False
@@ -958,9 +963,15 @@ class ChatWindow(QMainWindow):
         """The conversation transcript plus the input row (the original UI)."""
         panel = QWidget()
 
-        self.transcript = QTextBrowser()
-        self.transcript.setOpenLinks(False)
-        self.transcript.anchorClicked.connect(self.on_anchor)
+        self.using_web = _HAS_WEBENGINE
+        if self.using_web:
+            self.bridge = WebBridge(self, WEB_ASSETS)
+            self.transcript = self.bridge.widget()
+        else:
+            self.bridge = None
+            self.transcript = QTextBrowser()
+            self.transcript.setOpenLinks(False)
+            self.transcript.anchorClicked.connect(self.on_anchor)
 
         self.input = QLineEdit()
         self.input.setPlaceholderText("Ask the agent...")
@@ -1694,6 +1705,8 @@ class ChatWindow(QMainWindow):
         except Exception:
             pass
 
+        if self.bridge:
+            self.bridge.push({"type": "theme", "mode": self.resolve_mode()})
         self.render(scroll_to_end=False)
 
     # --- rendering ---------------------------------------------------------
@@ -1801,27 +1814,51 @@ class ChatWindow(QMainWindow):
         self.render(scroll_to_end=True)
 
     def add_user(self, text):
-        self.add({"kind": "user", "text": text})
+        if self.bridge:
+            self.bridge.push({"type": "user", "text": text})
+        else:
+            self.add({"kind": "user", "text": text})
 
     def add_reasoning(self, text):
-        # Reasoning shows while the agent is thinking, then is cleared when
-        # the final answer arrives (matching Cline / the terminal behaviour).
-        self.add({"kind": "reasoning", "text": text, "expanded": True})
+        if self.bridge:
+            self.bridge.push({"type": "reasoning", "content": text, "streaming": False})
+        else:
+            # Reasoning shows while the agent is thinking, then is cleared when
+            # the final answer arrives (matching Cline / the terminal behaviour).
+            self.add({"kind": "reasoning", "text": text, "expanded": True})
 
     def add_agent(self, text):
-        # Drop any reasoning blocks that were shown while thinking, so the
-        # final transcript is clean — only the answer remains.
-        self.items = [i for i in self.items if i.get("kind") != "reasoning"]
-        self.add({"kind": "agent", "text": text})
+        if self.bridge:
+            # Drop reasoning blocks handled by the web app itself.
+            self.bridge.push({"type": "assistant_message", "content": text, "streaming": False})
+        else:
+            # Drop any reasoning blocks that were shown while thinking, so the
+            # final transcript is clean — only the answer remains.
+            self.items = [i for i in self.items if i.get("kind") != "reasoning"]
+            self.add({"kind": "agent", "text": text})
 
     def add_tool(self, name, args, result):
-        self.add({"kind": "tool", "name": name, "args": args, "result": result})
+        if self.bridge:
+            self.bridge.push({"type": "tool_result", "name": name, "args": args, "result": result})
+        else:
+            self.add({"kind": "tool", "name": name, "args": args, "result": result})
 
     def add_diff(self, path, diff_text):
-        self.add({"kind": "diff", "path": path, "diff": diff_text})
+        if self.bridge:
+            self.bridge.push({"type": "diff", "path": path, "diff": diff_text})
+        else:
+            self.add({"kind": "diff", "path": path, "diff": diff_text})
 
     def add_error(self, text):
-        self.add({"kind": "error", "text": text})
+        if self.bridge:
+            self.bridge.push({"type": "error", "text": text})
+        else:
+            self.add({"kind": "error", "text": text})
+
+    def add_tool_start(self, name):
+        if self.bridge:
+            self.bridge.push({"type": "tool_start", "name": name, "args": ""})
+        self.statusBar().showMessage(f"Running {name}...")
 
     def on_anchor(self, url):
         link = url.toString()
@@ -1850,7 +1887,7 @@ class ChatWindow(QMainWindow):
 
         self.worker = AgentWorker(self.client, self.model, self.messages, self.config, text)
         self.worker.assistantMessage.connect(self.add_agent)
-        self.worker.toolStart.connect(lambda n: self.statusBar().showMessage(f"Running {n}..."))
+        self.worker.toolStart.connect(self.add_tool_start)
         self.worker.toolResult.connect(self.add_tool)
         self.worker.fileDiff.connect(self.add_diff)
         self.worker.maxSteps.connect(self.add_agent)
@@ -1884,6 +1921,8 @@ class ChatWindow(QMainWindow):
         self.worker.provide_answer(answer)
 
     def on_finished(self):
+        if self.bridge:
+            self.bridge.push({"type": "done"})
         self.set_busy(False)
         self.worker = None
         self.statusBar().showMessage("Ready")
