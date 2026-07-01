@@ -186,8 +186,16 @@ class WebBridge:
         self.view.load(QUrl.fromLocalFile(os.path.join(web_dir, "index.html")))
 
     def push(self, event):
-        """Serialize one event and push it to the web page's __appendEvent."""
-        js = "window.__appendEvent && window.__appendEvent(%s);" % serialize_event(event)
+        """Serialize one event and push it to the web page's __appendEvent.
+
+        json.dumps(serialize_event(event)) double-encodes the JSON so the
+        embedded JS receives a STRING literal (which __appendEvent then
+        JSON.parses). A bare %s would pass a JS object literal that
+        JSON.parse rejects ("[object Object]" -> SyntaxError).
+        """
+        js = "window.__appendEvent && window.__appendEvent(%s);" % json.dumps(
+            serialize_event(event)
+        )
         self.view.page().runJavaScript(js)
 
     def widget(self):
@@ -346,7 +354,7 @@ class AgentWorker(QThread):
     """Runs one agent turn in a background thread and reports events as signals."""
 
     assistantMessage = Signal(str)
-    toolStart = Signal(str)
+    toolStart = Signal(str, str)     # name, args
     toolResult = Signal(str, str, str)     # name, args, result
     fileDiff = Signal(str, str)            # label, unified diff text
     maxSteps = Signal(str)
@@ -439,7 +447,7 @@ class AgentWorker(QThread):
                 elif kind == "tool_start":
                     # The tool hasn't run yet, so snapshot the file's current text.
                     self._snapshot_before(event["name"], event.get("args", ""))
-                    self.toolStart.emit(event["name"])
+                    self.toolStart.emit(event["name"], event.get("args", ""))
                 elif kind == "tool_result":
                     self.toolResult.emit(event["name"], event.get("args", ""), event["result"])
                     # Now the tool has run: diff old vs new and show it in chat.
@@ -1880,9 +1888,9 @@ class ChatWindow(QMainWindow):
         else:
             self.add({"kind": "error", "text": text})
 
-    def add_tool_start(self, name):
+    def add_tool_start(self, name, args):
         if self.bridge:
-            self.bridge.push({"type": "tool_start", "name": name, "args": ""})
+            self.bridge.push({"type": "tool_start", "name": name, "args": args})
         self.statusBar().showMessage(f"Running {name}...")
 
     def on_anchor(self, url):

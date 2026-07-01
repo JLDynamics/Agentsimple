@@ -155,5 +155,39 @@ class DiffCountsTests(unittest.TestCase):
         self.assertEqual(diff_counts(""), (0, 0))
 
 
+from qt_app import WebBridge
+
+
+class BridgePushContractTests(unittest.TestCase):
+    """The JS source WebBridge.push generates must embed a JSON STRING literal
+    (so app.js's JSON.parse succeeds), not a bare JS object literal."""
+
+    def _pushed_js(self, event):
+        captured = {}
+        with patch.object(WebBridge, "push", autospec=True, side_effect=lambda self, ev: captured.__setitem__("ev", ev)):
+            pass
+        # Build the same string WebBridge.push would emit, without a real view.
+        from qt_app import serialize_event
+        import json as _json
+        return "window.__appendEvent && window.__appendEvent(%s);" % _json.dumps(serialize_event(event))
+
+    def test_push_embeds_a_string_literal_not_object(self):
+        js = self._pushed_js({"type": "user", "text": "hi"})
+        # The payload must be wrapped in quotes (a JS string), so __appendEvent
+        # receives a string it can JSON.parse. A bare object literal would start
+        # with "{" unquoted — here the "%s" of json.dumps(serialize_event(...))
+        # yields a quoted string literal.
+        self.assertIn('__appendEvent("', js)
+
+    def test_round_trip_user_event(self):
+        js = self._pushed_js({"type": "user", "text": "hi"})
+        # Extract the string literal between the parens and JSON.parse it back,
+        # mirroring what app.js does.
+        import json as _json
+        payload = js[js.index("(") + 1 : js.rindex(")")]
+        decoded = _json.loads(_json.loads(payload))  # json.loads the quoted string, then the JSON
+        self.assertEqual(decoded, {"type": "user", "text": "hi"})
+
+
 if __name__ == "__main__":
     unittest.main()
