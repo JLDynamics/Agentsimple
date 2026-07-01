@@ -64,9 +64,10 @@
         const req = shikiPending.get(d.id);
         if (!req) return;
         shikiPending.delete(d.id);
-        if (d.type === "ok" && req.pre) {
-          // Swap the placeholder pre's innerHTML with Shiki's highlighted output.
-          req.pre.innerHTML = d.html;
+        if (d.type === "ok" && req.pre && document.contains(req.pre)) {
+          // Shiki returns a full <pre class="shiki">…</pre>; replace in place.
+          // outerHTML swaps the live node (the wrapper + copy button remain).
+          req.pre.outerHTML = d.html;
         }
       };
     } catch {
@@ -104,11 +105,12 @@
   // Re-highlight all code blocks on theme change (called from renderTheme).
   function rehighlightForTheme() {
     if (!shikiReady) return;
-    root.querySelectorAll(".markdown-code pre").forEach((pre) => {
-      const code = pre.querySelector("code");
-      if (!code) return;
-      const lang = (code.className.match(/language-([\w-]+)/) || [])[1] || "text";
-      requestHighlight(pre, code.textContent, lang);
+    // Re-highlight every code block using the lang stashed on its wrapper.
+    root.querySelectorAll(".markdown-code").forEach((wrapper) => {
+      const pre = wrapper.querySelector("pre");
+      if (!pre) return;
+      const lang = wrapper.dataset.lang || "text";
+      requestHighlight(pre, pre.textContent, lang);
     });
   }
 
@@ -123,18 +125,22 @@
 
   // Render markdown into a container, decorate code blocks (Shiki + copy), and
   // morphdom-patch the result into the live DOM node.
-  function renderMarkdownInto(container, text) {
+  function renderMarkdownInto(container, text, allowHighlight) {
     const html = mdToHtml(text);
     const next = el("div", "", html);
 
-    // Decorate: wrap each <pre> in .markdown-code with a copy button.
+    // Decorate: wrap each <pre> in .markdown-code with a copy button (on the
+    // detached `next` tree). We do NOT request highlighting here — morphdom
+    // moves these nodes into the live DOM, after which we highlight live nodes.
     next.querySelectorAll("pre").forEach((pre) => {
       const code = pre.querySelector("code");
       const lang = code ? (code.className.match(/language-([\w-]+)/) || [])[1] : null;
       const wrapper = el("div", "markdown-code");
+      wrapper.dataset.lang = lang || "text";
       pre.parentElement.replaceChild(wrapper, pre);
       wrapper.appendChild(pre);
       const btn = el("button", "copy-btn", "Copy");
+      btn.dataset.slot = "markdown-copy-button";
       btn.addEventListener("click", () => {
         navigator.clipboard.writeText(code ? code.textContent : "").then(() => {
           btn.textContent = "Copied";
@@ -142,13 +148,12 @@
         });
       });
       wrapper.appendChild(btn);
-      if (code) requestHighlight(pre, code.textContent, lang || "text");
     });
 
     if (morphdomLib) {
       morphdomLib(container, next, {
         onBeforeElUpdated: (fromEl, toEl) => {
-          // Preserve copy buttons and already-highlighted <pre> across patches.
+          // Preserve copy buttons across patches.
           if (fromEl.dataset && fromEl.dataset.slot === "markdown-copy-button") return false;
           return true;
         },
@@ -156,6 +161,24 @@
     } else {
       container.innerHTML = next.innerHTML;
     }
+
+    // Highlight live code blocks AFTER morphdom attached them. Run only when
+    // allowed (skip during streaming for performance; highlight on the final render).
+    if (allowHighlight) highlightCodeBlocks(container);
+  }
+
+  // Highlight any live code blocks that Shiki hasn't processed yet. Skips
+  // blocks already carrying a shiki class (idempotent / theme-safe re-renders).
+  function highlightCodeBlocks(container) {
+    container.querySelectorAll(".markdown-code").forEach((wrapper) => {
+      const pre = wrapper.querySelector("pre");
+      if (!pre) return;
+      if (pre.className.indexOf("shiki") !== -1) return; // already highlighted
+      const lang = wrapper.dataset.lang || "text";
+      const code = pre.querySelector("code");
+      const text = code ? code.textContent : pre.textContent;
+      requestHighlight(pre, text, lang);
+    });
   }
 
   // ---- paced reveal (ported from opencode's PacedMarkdown) ----
@@ -184,7 +207,8 @@
     if (!st) { st = { shown: "", timer: null }; revealState.set(container, st); }
 
     const clear = () => { if (st.timer) { clearTimeout(st.timer); st.timer = null; } };
-    const sync = (t) => { st.shown = t; renderMarkdownInto(container, t); };
+    // Highlight only on the final (non-streaming) render, not every paced tick.
+    const sync = (t) => { st.shown = t; renderMarkdownInto(container, t, !isStreaming); };
 
     clear();
     if (!isStreaming) { sync(fullText); return; }
@@ -290,6 +314,14 @@
       pendingAssistant.classList.remove("streaming");
       pendingAssistant = null;
     }
+    // Stop any lingering reasoning shimmer if no final assistant message dropped it.
+    if (pendingReasoning) {
+      pendingReasoning._streaming = false;
+      const toggle = pendingReasoning.querySelector(".toggle");
+      if (toggle) {
+        toggle.innerHTML = (pendingReasoning._expanded ? "▼" : "▶") + ' <b>Thinking</b>';
+      }
+    }
     return null;
   }
 
@@ -351,10 +383,10 @@
       toggle.innerHTML = '<span class="shimmer"></span> Thinking';
       const h = heading(ev.content);
       if (h) toggle.innerHTML += ' <span style="opacity:.7">' + escapeText(h) + '</span>';
-      if (pendingReasoning._expanded) renderMarkdownInto(body, ev.content);
+      if (pendingReasoning._expanded) renderMarkdownInto(body, ev.content, false);
     } else {
       toggle.innerHTML = (pendingReasoning._expanded ? "▼" : "▶") + ' <b>Thinking</b>';
-      if (pendingReasoning._expanded) renderMarkdownInto(body, ev.content);
+      if (pendingReasoning._expanded) renderMarkdownInto(body, ev.content, true);
     }
 
     function updateToggleArrow() {
