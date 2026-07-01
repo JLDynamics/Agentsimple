@@ -1180,7 +1180,8 @@ class ChatWindow(QMainWindow):
         self.messages = [current_system_message()]
         self.items = [{"kind": "agent", "text": "Ready. What should I do?"}]
         self._dirty = False
-        self.render(scroll_to_end=True)
+        if not self.using_web:
+            self.render(scroll_to_end=True)
         self.refresh_sessions()
         self.statusBar().showMessage("Started a new session")
 
@@ -1199,7 +1200,8 @@ class ChatWindow(QMainWindow):
         self.items = self.items_from_messages(self.messages)
         if not self.items:
             self.items = [{"kind": "agent", "text": "(This session has no messages yet.)"}]
-        self.render(scroll_to_end=True)
+        if not self.using_web:
+            self.render(scroll_to_end=True)
         self.refresh_sessions()
         self.statusBar().showMessage(f"Resumed session: {name}")
 
@@ -1414,7 +1416,8 @@ class ChatWindow(QMainWindow):
         self.messages = [current_system_message()]
         self.items = [{"kind": "agent", "text": "Ready. What should I do?"}]
         self._dirty = False
-        self.render(scroll_to_end=True)
+        if not self.using_web:
+            self.render(scroll_to_end=True)
         self.refresh_sessions()
         self.statusBar().showMessage(f"Working directory: {chosen}")
 
@@ -1824,7 +1827,8 @@ class ChatWindow(QMainWindow):
 
     def add(self, item):
         self.items.append(item)
-        self.render(scroll_to_end=True)
+        if not self.using_web:
+            self.render(scroll_to_end=True)
 
     def add_user(self, text):
         if self.bridge:
@@ -1886,7 +1890,8 @@ class ChatWindow(QMainWindow):
         if link.startswith("toggle:"):
             index = int(link.split(":", 1)[1])
             self.items[index]["expanded"] = not self.items[index].get("expanded", False)
-            self.render(scroll_to_end=False)
+            if not self.using_web:
+                self.render(scroll_to_end=False)
         else:
             QDesktopServices.openUrl(url)
 
