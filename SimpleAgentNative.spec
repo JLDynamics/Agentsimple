@@ -1,4 +1,4 @@
-# PyInstaller spec for the native (PySide6/Qt) Simple Agent app.
+﻿# PyInstaller spec for the native (PySide6/Qt) Simple Agent app.
 # Build with:  uv run pyinstaller SimpleAgentNative.spec --noconfirm
 #
 #  - --onedir build: output is dist/SimpleAgentNative/ containing the exe + support files.
@@ -11,6 +11,7 @@ datas = [
     ("tools_schema.json", "."),   # read by config.py at import time
     ("agent_config.json", "."),   # read by load_config()
     (".env", "."),                # your API key (don't share the dist folder)
+    ("web", "web"),               # static assets for the QWebEngineView chat
 ]
 
 # qt_app.py imports these normally, so PyInstaller should trace them automatically.
@@ -25,6 +26,8 @@ hiddenimports = [
     "safety",
     "ui",
     "sessions",
+    "PySide6.QtWebEngineWidgets",
+    "PySide6.QtWebChannel",        # often needed alongside QWebEngine
 ]
 
 a = Analysis(
