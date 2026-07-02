@@ -26,6 +26,8 @@ AUTO_ALLOW_PREFIXES = [
     "select-string",
     "rg",
     "uv run",
+    "python -m py_compile",
+    "python -m unittest",
     "uv sync",
 ]
 

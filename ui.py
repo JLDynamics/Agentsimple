@@ -1,6 +1,7 @@
 """Everything the user sees: the shared console, printing, and the /show commands."""
 
 import os
+import re
 import sys
 
 from rich.console import Console
@@ -27,6 +28,22 @@ except (AttributeError, ValueError):
 console = Console()
 
 
+
+
+def is_skill_question(text: str) -> bool:
+    """Return True if user asks about skills (not to use/save/read/delete one)."""
+    lowered = text.lower().strip()
+    action_pats = [r'\buse\b.*\bskill\b', r'\bsave\b.*\bskill\b',
+                  r'\bread\b.*\bskill\b', r'\bdelete\b.*\bskill\b']
+    for p in action_pats:
+        if re.search(p, lowered):
+            return False
+    query_pats = [r'\bwhat\b.*\bskill', r'\bshow\b.*\bskill', r'\blist\b.*\bskill',
+                 r'\bdo you have\b.*\bskill', r'\bis there\b.*\bskill']
+    for p in query_pats:
+        if re.search(p, lowered):
+            return True
+    return False
 def print_agent_markdown(text: str) -> None:
     if not text.strip():
         return
@@ -147,33 +164,6 @@ def show_skills() -> None:
     print()
     print(tools.list_skills())
     print()
-
-
-def is_skill_question(user_input: str) -> bool:
-    text = " ".join(user_input.lower().split())
-
-    direct_patterns = [
-        "what skills",
-        "which skills",
-        "show skills",
-        "list skills",
-        "list saved skills",
-        "saved skills",
-    ]
-
-    if any(pattern in text for pattern in direct_patterns):
-        return True
-
-    project_skill_patterns = [
-        "do you have a project skill",
-        "do you have any project skill",
-        "is there a project skill",
-        "project-specific skill",
-        "project level skill",
-        "project-level skill",
-    ]
-
-    return any(pattern in text for pattern in project_skill_patterns)
 
 
 def show_help() -> None:

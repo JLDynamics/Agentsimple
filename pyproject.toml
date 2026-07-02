@@ -5,13 +5,10 @@ description = "A compact local coding agent you can point at any project folder.
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "chainlit>=2.11.1",
-    "markdown>=3.10.2",
     "openai>=2.38.0",
     "pyinstaller>=6.20.0",
     "pyside6>=6.11.1",
     "python-dotenv>=1.2.2",
-    "pywebview>=6.2.1",
     "rich>=15.0.0",
     "tavily-python>=0.7.26",
     "trafilatura>=2.0.0",

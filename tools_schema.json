@@ -2,42 +2,50 @@
   {
     "type": "function",
     "function": {
-      "name": "list_files",
-      "description": "List files and folders inside the project.",
+      "name": "read_files",
+      "description": "Inspect and read files/folders in the project. One tool, several modes; pick the mode for the job.\n- mode 'read' (default): read file contents with 1-based line numbers. Pass start_line/end_line to read a slice of one file when output is long or you need a later part. Pass several paths to read multiple small files in one call.\n- mode 'list': list the immediate contents of one or more folders.\n- mode 'tree': show a folder tree under a path up to max_depth levels (skips .git, .venv, __pycache__, .simpleagent).\n- mode 'glob': find files whose names match a pattern (e.g. '*.py') under a path. Requires pattern.\n- mode 'info': basic metadata (type, size, line count, modified time) for one or more paths.\nUse this instead of terminal commands like Get-Content, type, cat, dir, ls for inspecting files.",
       "parameters": {
         "type": "object",
         "properties": {
-          "path": {
+          "paths": {
+            "type": "array",
+            "description": "One or more paths relative to the project root. For 'tree' and 'glob' the first path is the root (use '.' for the project root).",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mode": {
             "type": "string",
-            "description": "Folder path relative to the project root."
-          }
-        },
-        "required": [
-          "path"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "list_project_tree",
-      "description": "Show the project folder structure with a depth limit. Use this to understand the shape of the project before reading files.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "Folder path relative to the project root."
+            "description": "What to do: 'read' (default), 'list', 'tree', 'glob', or 'info'.",
+            "enum": [
+              "read",
+              "list",
+              "tree",
+              "glob",
+              "info"
+            ],
+            "default": "read"
+          },
+          "start_line": {
+            "type": "integer",
+            "description": "First line to read, 1-based inclusive. Only used in 'read' mode with a single file."
+          },
+          "end_line": {
+            "type": "integer",
+            "description": "Last line to read, 1-based inclusive. Only used in 'read' mode with a single file."
           },
           "max_depth": {
             "type": "integer",
-            "description": "How many folder levels to include."
+            "description": "Folder levels to include in 'tree' mode.",
+            "default": 2
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Filename pattern for 'glob' mode, e.g. '*.py' or '*.md'."
           }
         },
         "required": [
-          "path",
-          "max_depth"
+          "paths"
         ]
       }
     }
@@ -45,256 +53,71 @@
   {
     "type": "function",
     "function": {
-      "name": "glob_files",
-      "description": "Find files inside the project using a filename pattern like *.py or *.md.",
+      "name": "search_codebase",
+      "description": "Search the project for a word or regular expression (case-insensitive). Returns matching lines as 'path:line_number: line'. Use file_glob to scope to a file type (e.g. '*.py'). Results are capped; narrow the pattern or use file_glob if there are too many.",
       "parameters": {
         "type": "object",
         "properties": {
           "pattern": {
             "type": "string",
-            "description": "Filename pattern to match, such as *.py or *.txt."
+            "description": "Word or regular expression to search for, case-insensitive."
           },
           "path": {
             "type": "string",
-            "description": "Folder path relative to the project root."
-          }
-        },
-        "required": [
-          "pattern",
-          "path"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "get_file_info",
-      "description": "Get basic metadata for a file or folder, including file size, line count, and modified time when available.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "Path relative to the project root."
-          }
-        },
-        "required": [
-          "path"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "read_file",
-      "description": "Read a text file inside the project. Each line is shown with a leading 'line_number: ' prefix for reference only; that prefix is not part of the file.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "File path relative to the project root."
-          }
-        },
-        "required": [
-          "path"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "read_file_range",
-      "description": "Read a specific 1-based inclusive line range from a text file inside the project. Use this when read_file output is too long or when you need a later part of a file. Prefer this over terminal commands like Get-Content, type, or cat.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "File path relative to the project root."
+            "description": "Folder to search in, relative to the project root. Defaults to the project root.",
+            "default": "."
           },
-          "start_line": {
-            "type": "integer",
-            "description": "First line to read, using 1-based line numbers."
+          "file_glob": {
+            "type": "string",
+            "description": "Optional filename pattern to scope the search, e.g. '*.py' or '*.md'.",
+            "default": ""
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "editor",
+      "description": "Create or change files in the project. One tool, four operations; pick 'operation' for the job.\n- 'write': create or overwrite a file with full content.\n- 'patch': apply one or more targeted edits to an existing file. Each replacement must have a unique old_text (add surrounding lines if it appears more than once). The whole file is kept; only the matched text is swapped. To insert, match an anchor line and include it plus the new text in new_text.\n- 'delete': delete a file (refuses to delete a folder).\n- 'move': move or rename a file from source to destination.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "description": "What to do: 'write', 'patch', 'delete', or 'move'.",
+            "enum": [
+              "write",
+              "patch",
+              "delete",
+              "move"
+            ]
           },
-          "end_line": {
-            "type": "integer",
-            "description": "Last line to read, using 1-based line numbers."
-          }
-        },
-        "required": [
-          "path",
-          "start_line",
-          "end_line"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "read_many_files",
-      "description": "Read several text files in one tool call. Use this for small related files instead of making many read_file calls.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "paths": {
-            "type": "array",
-            "description": "File paths relative to the project root.",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "required": [
-          "paths"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "write_file",
-      "description": "Create or overwrite a text file inside the project.",
-      "parameters": {
-        "type": "object",
-        "properties": {
           "path": {
             "type": "string",
-            "description": "File path relative to the project root."
+            "description": "Target file path relative to the project root. Used by 'write', 'patch', and 'delete'."
           },
           "content": {
             "type": "string",
-            "description": "The full text content to write."
-          }
-        },
-        "required": [
-          "path",
-          "content"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "run_python_tests",
-      "description": "Run Python unittest tests for the project. Use this instead of execute_terminal_command for normal Python test runs.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "test_path": {
-            "type": "string",
-            "description": "Optional test file path relative to the project root. Use an empty string to run unittest discovery."
-          }
-        },
-        "required": [
-          "test_path"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "compile_python",
-      "description": "Compile Python files with py_compile to catch syntax errors. Use this instead of execute_terminal_command for normal Python syntax checks.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "paths": {
-            "type": "array",
-            "description": "Python file paths relative to the project root. Use an empty list to compile all project Python files.",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "required": [
-          "paths"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "git_status",
-      "description": "Show short git status for the project.",
-      "parameters": {
-        "type": "object",
-        "properties": {},
-        "required": []
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "git_diff",
-      "description": "Show git diff for the whole project or one file. Use this instead of execute_terminal_command for normal git diff inspection.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "Optional file path relative to the project root. Use an empty string for the whole diff."
-          }
-        },
-        "required": [
-          "path"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "git_log",
-      "description": "Show recent git commits in compact one-line format. Use this to understand how the project evolved before making changes.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "count": {
-            "type": "integer",
-            "description": "How many recent commits to show (1 to 50)."
-          }
-        },
-        "required": [
-          "count"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "apply_patch",
-      "description": "Apply one or more exact text replacements to a file inside the project. old_text must be the literal file text, without any 'line_number: ' prefix shown by read_file or read_file_range. It must match exactly once.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "File path relative to the project root."
+            "description": "The full text content to write. Used by 'write'."
           },
           "replacements": {
             "type": "array",
-            "description": "Exact text replacements to apply in order.",
+            "description": "Targeted edits for 'patch'. Each item swaps a unique old_text for new_text.",
             "items": {
               "type": "object",
               "properties": {
                 "old_text": {
                   "type": "string",
-                  "description": "Existing text to replace exactly once."
+                  "description": "The exact text to find (must be unique in the file)."
                 },
                 "new_text": {
                   "type": "string",
-                  "description": "Replacement text."
+                  "description": "The text to replace it with."
                 }
               },
               "required": [
@@ -302,54 +125,18 @@
                 "new_text"
               ]
             }
-          }
-        },
-        "required": [
-          "path",
-          "replacements"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "delete_file",
-      "description": "Delete a single file inside the project. Cannot delete folders.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "File path relative to the project root."
-          }
-        },
-        "required": [
-          "path"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "move_file",
-      "description": "Move or rename a file in one step. Prefer this over write_file + delete_file when renaming a file.",
-      "parameters": {
-        "type": "object",
-        "properties": {
+          },
           "source": {
             "type": "string",
-            "description": "Current file path relative to the project root."
+            "description": "Source file path. Used by 'move'."
           },
           "destination": {
             "type": "string",
-            "description": "New file path relative to the project root."
+            "description": "Destination file path. Used by 'move'."
           }
         },
         "required": [
-          "source",
-          "destination"
+          "operation"
         ]
       }
     }
@@ -357,42 +144,14 @@
   {
     "type": "function",
     "function": {
-      "name": "search_files",
-      "description": "Search for text inside project files using a regular expression. Plain words work too, like main. Regex examples: def .*tool, import (os|json), TODO|FIXME. Pass file_glob to scope the search to certain files, which is faster and less noisy.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "pattern": {
-            "type": "string",
-            "description": "Regular expression to search for, case-insensitive."
-          },
-          "path": {
-            "type": "string",
-            "description": "Folder path relative to the project root."
-          },
-          "file_glob": {
-            "type": "string",
-            "description": "Optional filename pattern to limit which files are searched, such as *.py or *.md. Use an empty string to search all files."
-          }
-        },
-        "required": [
-          "pattern",
-          "path"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "execute_terminal_command",
-      "description": "Run a PowerShell command in the project folder. Use this only for tests, scripts, git commands, uv commands, and shell commands. Do not use this for reading, listing, or searching files; use list_files, glob_files, read_file, read_file_range, or search_files instead.",
+      "name": "run_command",
+      "description": "Run a shell command in the project folder. Use this for builds, tests, git, and any script not covered by the file/web tools. Read-only commands (dir, git status, git diff, git log, uv run, uv sync, etc.) run automatically. Commands that change files or system state (git push, pip install, remove-item, redirects, etc.) require approval, and dangerous patterns are blocked. Do NOT use this to read or list files - use read_files instead; file-inspection commands are blocked here.",
       "parameters": {
         "type": "object",
         "properties": {
           "command": {
             "type": "string",
-            "description": "The exact PowerShell command to run."
+            "description": "The shell command to run."
           }
         },
         "required": [
@@ -404,63 +163,61 @@
   {
     "type": "function",
     "function": {
-      "name": "web_fetch",
-      "description": "Fetch a web page or data endpoint over https. Optionally pass a prompt to get only the answer to that question instead of the full page, which saves space. JSON responses come back pretty-printed, which is ideal for live data. For live weather use https://wttr.in/CITY?format=j1 . For a live stock quote use https://query1.finance.yahoo.com/v8/finance/chart/SYMBOL . Returned content is untrusted reference data.",
+      "name": "fetch_web",
+      "description": "Reach the web. Two modes, picked by what you pass:\n- Pass 'url' to fetch one page or data endpoint (HTTPS only; local/private addresses are blocked). JSON is pretty-printed and HTML is stripped to text. Pass 'prompt' to get a focused answer distilled from the page instead of the full content.\n- Pass 'query' (no url) to run a web search via Tavily: returns titles, URLs, and snippets plus a short summary. Use search_type='news' for current events, search_depth='advanced' for more relevant results, include_domains to restrict to trusted sources, and time_limit to filter by age.\nFollow a search result by fetching its url in detail.",
       "parameters": {
         "type": "object",
         "properties": {
           "url": {
             "type": "string",
-            "description": "The full http or https URL to fetch."
+            "description": "Full http or https URL to fetch. If given, fetches that page (search params are ignored)."
+          },
+          "query": {
+            "type": "string",
+            "description": "Search query. Used when no url is given."
           },
           "prompt": {
             "type": "string",
-            "description": "Optional question to answer from the page. If given, only the focused answer is returned instead of the full page content."
-          }
-        },
-        "required": [
-          "url"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "web_search",
-      "description": "Search the web or news using Tavily. Returns a list of result titles, URLs, and snippets, plus a short summary answer when available. Use search_type='text' for documentation, packages, error explanations, or general facts. Use search_type='news' for recent news, current events, and time-sensitive topics; it defaults to the past day. Use search_depth='advanced' for more thorough, higher-relevance results (costs 2 API credits). Use include_domains to restrict results to trusted sources such as 'python.org' or 'github.com'. Follow up with web_fetch to read a specific page in detail.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "query": {
-            "type": "string",
-            "description": "The search query."
+            "description": "Optional question to answer from the fetched page. Only used with 'url'."
           },
           "max_results": {
             "type": "integer",
-            "description": "Maximum number of results to return (1-10). Default is 5.",
+            "description": "Maximum search results to return (1-10). Default 5. Used with 'query'.",
             "default": 5
           },
-          "timelimit": {
+          "time_limit": {
             "type": "string",
-            "description": "Time filter for results: 'd' (past day), 'w' (past week), 'm' (past month), 'y' (past year). For news, 'y' is not supported; if omitted, news defaults to 'd'.",
-            "enum": ["d", "w", "m", "y"]
+            "description": "Search time filter: 'd' (day), 'w' (week), 'm' (month), 'y' (year). Used with 'query'.",
+            "enum": [
+              "d",
+              "w",
+              "m",
+              "y"
+            ]
           },
           "search_type": {
             "type": "string",
-            "description": "Type of search: 'text' for general web search (default), 'news' for news/current events.",
-            "enum": ["text", "news"],
+            "description": "'text' for general web search (default), 'news' for current events. Used with 'query'.",
+            "enum": [
+              "text",
+              "news"
+            ],
             "default": "text"
           },
           "search_depth": {
             "type": "string",
-            "description": "Search depth: 'basic' (default, 1 credit), 'advanced' (2 credits, more relevant, includes multiple chunks per source), 'fast' or 'ultra-fast' for lower latency.",
-            "enum": ["basic", "advanced", "fast", "ultra-fast"],
+            "description": "Search depth: 'basic' (default), 'advanced' (more relevant), 'fast' or 'ultra-fast'. Used with 'query'.",
+            "enum": [
+              "basic",
+              "advanced",
+              "fast",
+              "ultra-fast"
+            ],
             "default": "basic"
           },
           "include_domains": {
             "type": "array",
-            "description": "Optional list of domains to prioritize or restrict results to, e.g. ['python.org', 'github.com', 'stackoverflow.com'].",
+            "description": "Domains to restrict search to, e.g. ['python.org', 'github.com']. Used with 'query'.",
             "items": {
               "type": "string"
             },
@@ -468,100 +225,10 @@
           },
           "exact_match": {
             "type": "boolean",
-            "description": "If true, only return results containing the exact quoted phrase(s) in the query. Best for precise lookups.",
+            "description": "If true, only return results containing the exact quoted phrase(s). Used with 'query'.",
             "default": false
           }
         },
-        "required": [
-          "query"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "update_global_memory",
-      "description": "Update your long-term memory about the USER (not about any project). Use this for durable facts about who the user is, their preferences, goals, and how they like to work. You maintain this yourself: whenever you learn something lasting and important about the user, save it here. You provide the FULL new memory content, which replaces the old file, so include the facts you want to keep plus the new one, and drop anything stale. Keep it concise markdown; it must stay under 2000 characters.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "content": {
-            "type": "string",
-            "description": "The full new global memory content, as concise markdown."
-          }
-        },
-        "required": [
-          "content"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "update_project_memory",
-      "description": "Update your long-term memory about the CURRENT PROJECT (not about the user). Use this for durable project knowledge: architecture, key files, decisions, conventions, gotchas, and open tasks. You maintain this yourself: whenever you learn something lasting and important about the project, save it here. You provide the FULL new memory content, which replaces the old file, so include the knowledge you want to keep plus the new one, and drop anything stale. Keep it concise markdown; it must stay under 6000 characters.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "content": {
-            "type": "string",
-            "description": "The full new project memory content, as concise markdown."
-          }
-        },
-        "required": [
-          "content"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "search_sessions",
-      "description": "Search past saved conversations (sessions) in this project for a word or regular expression. Use this to recall something discussed in an earlier session. Returns short matching snippets with the session name and date, newest first. Then use read_session to read a specific session in full if you need more context.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "query": {
-            "type": "string",
-            "description": "Word or regular expression to search for, case-insensitive."
-          }
-        },
-        "required": [
-          "query"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "read_session",
-      "description": "Read one past session conversation in full, by its session name (for example session-20260605-153012). Use this after search_sessions to see the full context around a match.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "The session name, with or without the .json extension."
-          }
-        },
-        "required": [
-          "name"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "list_skills",
-      "description": "List all currently saved skills, including both global skills and project-specific skills. Use this before answering questions about what skills are available.",
-      "parameters": {
-        "type": "object",
-        "properties": {},
         "required": []
       }
     }
@@ -569,52 +236,27 @@
   {
     "type": "function",
     "function": {
-      "name": "read_skill",
-      "description": "Load the full steps of a saved skill by name. Your available skills are listed in your system prompt by name and description; read one before doing a task it covers.",
+      "name": "memory",
+      "description": "Update your long-term memory, which is loaded into context every session. Provide the FULL new content; it replaces the old file, so keep everything you want plus the new fact and drop anything stale. Use scope 'global' for durable facts about the user (max 2000 chars), 'project' for durable facts about the current project (max 6000 chars). Keep it concise markdown.",
       "parameters": {
         "type": "object",
         "properties": {
-          "name": {
+          "scope": {
             "type": "string",
-            "description": "The skill name, for example add-a-tool."
-          }
-        },
-        "required": [
-          "name"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "save_skill",
-      "description": "Create or update a reusable skill: a short markdown runbook for a task you may repeat. Save one after finishing a non-trivial task, and update one that was helpful but incomplete or wrong. Keep it concise (under 4000 characters).",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "Short lowercase-hyphen name, like add-a-tool."
-          },
-          "description": {
-            "type": "string",
-            "description": "One line describing when to use this skill."
+            "description": "Which memory to update: 'global' (about the user) or 'project' (about this project).",
+            "enum": [
+              "global",
+              "project"
+            ]
           },
           "content": {
             "type": "string",
-            "description": "The procedure as markdown: when to use, steps, pitfalls, and how to verify success."
-          },
-          "scope": {
-            "type": "string",
-            "description": "Use 'project' for a skill specific to the current project, or 'global' for a general skill useful in any project."
+            "description": "The full new memory content as concise markdown."
           }
         },
         "required": [
-          "name",
-          "description",
-          "content",
-          "scope"
+          "scope",
+          "content"
         ]
       }
     }
@@ -622,18 +264,105 @@
   {
     "type": "function",
     "function": {
-      "name": "delete_skill",
-      "description": "Delete a saved skill by name when it is stale or wrong.",
+      "name": "skills",
+      "description": "Manage your reusable skills (short markdown runbooks you write and improve). One tool, four actions:\n- 'list': list all saved skills (names + descriptions).\n- 'read': load the full steps of a skill by name (do this before a task a skill covers).\n- 'save': create or update a skill. Keep it concise (max 4000 chars). Use scope 'project' or 'global'.\n- 'delete': delete a skill that is stale or wrong.",
       "parameters": {
         "type": "object",
         "properties": {
+          "action": {
+            "type": "string",
+            "description": "What to do: 'list', 'read', 'save', or 'delete'.",
+            "enum": [
+              "list",
+              "read",
+              "save",
+              "delete"
+            ]
+          },
           "name": {
             "type": "string",
-            "description": "The skill name to delete."
+            "description": "Skill name (lowercase-hyphen, e.g. 'add-a-tool'). Used by 'read', 'save', and 'delete'."
+          },
+          "description": {
+            "type": "string",
+            "description": "One line describing when to use this skill. Used by 'save'."
+          },
+          "content": {
+            "type": "string",
+            "description": "The procedure as markdown: when to use, steps, pitfalls, how to verify. Used by 'save'."
+          },
+          "scope": {
+            "type": "string",
+            "description": "'project' for a project-specific skill, 'global' for a general skill. Used by 'save'.",
+            "enum": [
+              "project",
+              "global"
+            ],
+            "default": "project"
           }
         },
         "required": [
-          "name"
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "sessions",
+      "description": "Recall past conversations saved in this project. One tool, two actions:\n- 'search': search past sessions for a word or regular expression (case-insensitive); returns short matching snippets with the session name and date, newest first.\n- 'read': read one past session in full by its name (use after search to see the full context).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "What to do: 'search' or 'read'.",
+            "enum": [
+              "search",
+              "read"
+            ]
+          },
+          "query": {
+            "type": "string",
+            "description": "Word or regular expression to search for. Used by 'search'."
+          },
+          "name": {
+            "type": "string",
+            "description": "Session name, with or without the .json extension. Used by 'read'."
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ask_question",
+      "description": "Ask the user a clarifying question with 2 to 5 selectable options. Use this only when you need a key decision before proceeding and guessing wrong would be costly \u2014 not for every small question.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "The single question to ask the user."
+          },
+          "options": {
+            "type": "array",
+            "description": "2 to 5 selectable answer options.",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 2,
+            "maxItems": 5
+          }
+        },
+        "required": [
+          "question",
+          "options"
         ]
       }
     }

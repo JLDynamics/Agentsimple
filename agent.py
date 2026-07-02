@@ -1,11 +1,16 @@
 """The agent's brain: running tools, the step loop, and compaction."""
 
 import json
+import sys
 
 from config import AVAILABLE_TOOL, TOOLS
 from llm import complete
 from tools import log_tool_call
 from ui import console, print_agent_markdown
+
+# When True, the next final-response stream will clear all intermediate
+# output (tool calls, reasoning) before showing the response.
+_clear_before_response = False
 
 
 def run_tool(
@@ -15,10 +20,15 @@ def run_tool(
     approval_mode: str = "safe_auto",
 ) -> str:
     if show_tool_calls:
-        print()
-        print(f"[Tool call]: {tool_name}")
-        print(f"[Arguments]: {argument_text}")
-        print()
+        # Show a compact one-line tool call preview
+        try:
+            args_obj = json.loads(argument_text) if argument_text.strip() else {}
+        except json.JSONDecodeError:
+            args_obj = {}
+        args_summary = ", ".join(
+            f"{k}={str(v)[:80]}" for k, v in args_obj.items()
+        )[:200]
+        print(f"🔧 {tool_name}({args_summary})")
 
     if tool_name not in AVAILABLE_TOOL:
         result = f"ERROR: Unknown tool requested: {tool_name}"
@@ -34,7 +44,7 @@ def run_tool(
 
     try:
         tool_function = AVAILABLE_TOOL[tool_name]
-        if tool_name == "execute_terminal_command":
+        if tool_name == "run_command":
             result = tool_function(**arguments, approval_mode=approval_mode)
         else:
             result = tool_function(**arguments)
@@ -58,10 +68,82 @@ def create_assistant_message(
     messages: list[dict],
     stream_messages: bool,
 ) -> dict:
+    global _clear_before_response
+
+    if stream_messages:
+        from rich.markdown import Markdown
+
+        header_printed = [False]
+        status = console.status("Thinking...", spinner="dots")
+        status.start()
+
+        # Buffer all streamed content and track cursor for markdown re-render
+        all_content = []
+        cursor_saved = False
+
+        def on_chunk(chunk):
+            nonlocal cursor_saved
+            global _clear_before_response
+            # Save cursor position before first live-chunk so we can later
+            # clear the live text and re-render as pretty markdown
+            if _clear_before_response:
+                sys.stdout.write("\033[s")
+                sys.stdout.flush()
+                _clear_before_response = False
+                cursor_saved = True
+
+            if not header_printed[0]:
+                status.stop()
+                console.print()
+                console.print("Agent", style="bold cyan")
+                header_printed[0] = True
+            all_content.append(chunk)
+            print(chunk, end="", flush=True)
+
+        def on_reasoning(chunk):
+            if not header_printed[0]:
+                status.stop()
+                print("🧠 ", end="", flush=True)
+                header_printed[0] = True
+            print(chunk, end="", flush=True)
+
+        try:
+            assistant_record = complete(
+                client, model_name, messages, stream_messages,
+                tools=TOOLS, on_chunk=on_chunk, on_reasoning=on_reasoning,
+            )
+        finally:
+            status.stop()
+
+        # Live streaming is done — replace raw text with rendered markdown
+        if all_content and cursor_saved:
+            full = "".join(all_content)
+            sys.stdout.write("\033[u\033[J")
+            sys.stdout.flush()
+            console.print()
+            console.print("Agent", style="bold cyan")
+            console.print(Markdown(full.strip()))
+            console.print()
+
+        if header_printed[0] and not cursor_saved:
+            # Content was streamed but cursor wasn't saved (intermediate step
+            # with tool calls) — just add spacing
+            print()
+            print()
+
+        return assistant_record
+
+    # Non-streamed: spinner, then markdown-rendered response.
     with console.status("Thinking...", spinner="dots"):
         assistant_record = complete(
             client, model_name, messages, stream_messages, tools=TOOLS
         )
+
+    if _clear_before_response:
+        sys.stdout.write("\033[u\033[J")
+        sys.stdout.flush()
+        _clear_before_response = False
+        console.print()
 
     if assistant_record["content"]:
         print_agent_markdown(assistant_record["content"])
@@ -103,7 +185,18 @@ def run_agent_loop(
     approval_mode: str,
     show_tool_calls: bool,
 ):
+    global _clear_before_response
+
+    # Save cursor position at the start of the turn.
+    # Before the final response, we restore here and clear everything
+    # below (tool calls, reasoning, etc.) so only the final answer remains.
+    sys.stdout.write("\033[s")
+    sys.stdout.flush()
+
     for step_number in range(1, max_agent_steps + 1):
+        # Reset before each LLM call so the final step re-renders as markdown
+        _clear_before_response = True
+
         assistant_record = create_assistant_message(
             client,
             model_name,
@@ -125,12 +218,15 @@ def run_agent_loop(
         messages.append(assistant_record_for_history(assistant_record))
 
         for tool_call in tool_calls:
-            tool_result = run_tool(
-                get_tool_call_name(tool_call),
-                get_tool_call_arguments(tool_call),
-                show_tool_calls,
-                approval_mode,
-            )
+            try:
+                tool_result = run_tool(
+                    get_tool_call_name(tool_call),
+                    get_tool_call_arguments(tool_call),
+                    show_tool_calls,
+                    approval_mode,
+                )
+            except Exception as tool_error:
+                tool_result = f"ERROR: Tool failed: {tool_error}"
 
             messages.append(
                 {

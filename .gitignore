@@ -18,14 +18,11 @@ wheels/
 
 # Local IDE / tool settings
 .claude/
-
-# Chainlit auto-generated translations (keep config.toml)
-.chainlit/translations/
+.vscode/
 
 # Scratch / generated files
 code_practice
 decorator_practice.py
 opencode.json
 codebase_map.md
-tools_map.md
-mcps/
+tools_map.

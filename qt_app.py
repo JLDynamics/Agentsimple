@@ -11,6 +11,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -20,17 +21,22 @@ from PySide6.QtCore import (
     QEvent,
     QPoint,
     QPropertyAnimation,
+    QRegularExpression,
     QSettings,
     QSize,
     QThread,
+    QTimer,
     Signal,
 )
 from PySide6.QtGui import (
     QAction,
+    QColor,
     QCursor,
     QDesktopServices,
     QFont,
+    QSyntaxHighlighter,
     QTextBlockFormat,
+    QTextCharFormat,
     QTextCursor,
 )
 from PySide6.QtWidgets import (
@@ -139,6 +145,79 @@ def result_summary(result):
     return " ".join(text.split())[:60]
 
 
+# --- activity status (aggregate, spinner-driven — no per-call cards) ----------
+# A single line per turn accumulates tool-call counts by category and shows a
+# spinner while work is in progress, instead of one box per tool call (which
+# used to pile up into repeated rows of the same tool name and needed a click
+# to see the file text). Mirrors web/app.js's classifyTool/ACTIVITY.
+
+SPINNER_FRAMES = ("◐", "◓", "◑", "◒")
+
+ACTIVITY = {
+    "read":     {"progress": "Reading files",        "past": "Read",     "noun": "file"},
+    "edited":   {"progress": "Editing files",         "past": "Edited",   "noun": "file"},
+    "searched": {"progress": "Searching code",        "past": "Searched", "noun": "search"},
+    "ran":      {"progress": "Running a command",     "past": "Ran",      "noun": "command"},
+    "fetched":  {"progress": "Fetching the web",      "past": "Fetched",  "noun": "page"},
+    "memory":   {"progress": "Updating memory",       "past": "Updated",  "noun": "memory note"},
+    "skills":   {"progress": "Managing skills",       "past": "Updated",  "noun": "skill"},
+    "sessions": {"progress": "Checking past sessions", "past": "Checked", "noun": "session"},
+    "asked":    {"progress": "Asking a question",     "past": "Asked",    "noun": "question"},
+    "other":    {"progress": "Working",               "past": "Used",     "noun": "tool"},
+}
+ACTIVITY_ORDER = (
+    "read", "edited", "searched", "ran", "fetched",
+    "memory", "skills", "sessions", "asked", "other",
+)
+
+
+def classify_tool_call(name, args_text):
+    """Map a tool call to (category, count) for the aggregate status line."""
+    try:
+        args = json.loads(args_text) if args_text else {}
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+
+    if name == "read_files":
+        paths = args.get("paths")
+        count = len(paths) if isinstance(paths, list) else 1
+        return "read", max(count, 1)
+
+    if name == "editor":
+        operation = (args.get("operation") or "").lower()
+        return "edited", (2 if operation == "move" else 1)
+
+    if name == "search_codebase":
+        return "searched", 1
+    if name == "run_command":
+        return "ran", 1
+    if name == "fetch_web":
+        return "fetched", 1
+    if name == "memory":
+        return "memory", 1
+    if name == "skills":
+        return "skills", 1
+    if name == "sessions":
+        return "sessions", 1
+    if name == "ask_question":
+        return "asked", 1
+
+    return "other", 1
+
+
+def format_activity_counts(counts):
+    """Render {'read': 3, 'edited': 5, ...} as 'Read 3 files · Edited 5 files'."""
+    parts = []
+    for key in ACTIVITY_ORDER:
+        n = counts.get(key)
+        if not n:
+            continue
+        info = ACTIVITY[key]
+        noun = info["noun"] if n == 1 else info["noun"] + "s"
+        parts.append(f"{info['past']} {n} {noun}")
+    return " · ".join(parts)
+
+
 def diff_counts(diff_text):
     """Count added / removed lines, skipping the +++ / --- file headers."""
     added = removed = 0
@@ -166,12 +245,35 @@ def serialize_event(event):
 
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWebEngineCore import QWebEnginePage
     from PySide6.QtCore import QUrl
 
     _HAS_WEBENGINE = True
 except ImportError:
     QWebEngineView = None
+    QWebEnginePage = None
     _HAS_WEBENGINE = False
+
+
+if _HAS_WEBENGINE:
+
+    class _BridgePage(QWebEnginePage):
+        """A QWebEnginePage that intercepts a custom 'copy:<percent-encoded
+        text>' pseudo-URL as a lightweight JS -> Python channel.
+
+        Both the async Clipboard API (navigator.clipboard) and the legacy
+        document.execCommand('copy') are unreliable from the file:// origin
+        QtWebEngine loads the chat transcript from, so the "Copy" button on
+        code blocks instead navigates to this pseudo-URL, which we intercept
+        here and copy via Qt's own (always-working) system clipboard.
+        """
+
+        def acceptNavigationRequest(self, url, nav_type, is_main_frame):
+            if url.scheme() == "copy":
+                encoded = url.toString()[len("copy:"):]
+                QApplication.clipboard().setText(unquote(encoded))
+                return False  # swallow the navigation; nothing actually loads
+            return super().acceptNavigationRequest(url, nav_type, is_main_frame)
 
 
 class WebBridge:
@@ -183,6 +285,7 @@ class WebBridge:
 
     def __init__(self, parent_widget, web_dir):
         self.view = QWebEngineView(parent_widget)
+        self.view.setPage(_BridgePage(self.view))
         self.view.load(QUrl.fromLocalFile(os.path.join(web_dir, "index.html")))
 
     def push(self, event):
@@ -348,6 +451,101 @@ THEMES = {
         "diff_hunk": "#a78bfa",   # the "@@ ... @@" location headers (light purple)
     },
 }
+
+
+class CodeHighlighter(QSyntaxHighlighter):
+    """A lightweight syntax highlighter for the read-only file preview.
+
+    Not a full language server — just keywords/strings/numbers/comments/
+    decorators via regex, picked by file extension, so a file preview reads
+    better than a wall of plain monospace text.
+    """
+
+    PY_KEYWORDS = (
+        "False None True and as assert async await break class continue def del "
+        "elif else except finally for from global if import in is lambda nonlocal "
+        "not or pass raise return try while with yield self"
+    ).split()
+    JS_KEYWORDS = (
+        "break case catch class const continue debugger default delete do else "
+        "export extends finally for function if import in instanceof let new null "
+        "return super switch this throw true false try typeof undefined var void "
+        "while with yield async await"
+    ).split()
+    C_KEYWORDS = (
+        "break case char const continue default do double else enum extern float "
+        "for goto if int long return short signed sizeof static struct switch "
+        "typedef union unsigned void volatile while true false null class public "
+        "private protected new this import package func var let"
+    ).split()
+
+    # extension -> (keyword list, line-comment marker or None)
+    LANG_MAP = {
+        ".py": (PY_KEYWORDS, "#"),
+        ".pyw": (PY_KEYWORDS, "#"),
+        ".js": (JS_KEYWORDS, "//"), ".jsx": (JS_KEYWORDS, "//"),
+        ".ts": (JS_KEYWORDS, "//"), ".tsx": (JS_KEYWORDS, "//"),
+        ".c": (C_KEYWORDS, "//"), ".h": (C_KEYWORDS, "//"),
+        ".cpp": (C_KEYWORDS, "//"), ".hpp": (C_KEYWORDS, "//"),
+        ".cs": (C_KEYWORDS, "//"), ".java": (C_KEYWORDS, "//"),
+        ".go": (C_KEYWORDS, "//"), ".rs": (C_KEYWORDS, "//"),
+        ".sh": ([], "#"), ".bash": ([], "#"), ".yaml": ([], "#"),
+        ".yml": ([], "#"), ".toml": ([], "#"), ".ini": ([], ";"),
+        ".json": ([], None), ".css": ([], None), ".html": ([], None),
+    }
+
+    def __init__(self, document, extension, colors):
+        # QSyntaxHighlighter.setDocument() (called by the base constructor)
+        # triggers an immediate synchronous rehighlight, which would call our
+        # highlightBlock() before any real state exists. Pre-set everything it
+        # touches to a safe no-op state first, then fill in the real values
+        # (and run the real highlight pass) after super().__init__() returns.
+        self.rules = []
+        self.comment_prefix = None
+        super().__init__(document)
+        self._keywords, self.comment_prefix = self.LANG_MAP.get((extension or "").lower(), ([], "#"))
+        self.set_colors(colors)
+
+    def set_colors(self, colors):
+        """(Re)build the formats from the current theme, and re-run highlighting."""
+
+        def make_format(color_hex, bold=False):
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(color_hex))
+            if bold:
+                fmt.setFontWeight(QFont.Weight.Bold)
+            return fmt
+
+        self.fmt_keyword = make_format(colors["user"], bold=True)
+        self.fmt_string = make_format(colors["diff_add_fg"])
+        self.fmt_comment = make_format(colors["subtle"])
+        self.fmt_number = make_format(colors["inline_code"])
+        self.fmt_decorator = make_format(colors["agent"], bold=True)
+
+        self.rules = [(QRegularExpression(rf"\b{word}\b"), self.fmt_keyword) for word in self._keywords]
+        self.rules.append((QRegularExpression(r"\b[0-9][0-9_]*\.?[0-9]*\b"), self.fmt_number))
+        self.rules.append((QRegularExpression(r"@\w+"), self.fmt_decorator))
+        self.rules.append((QRegularExpression(r'"[^"\n]*"'), self.fmt_string))
+        self.rules.append((QRegularExpression(r"'[^'\n]*'"), self.fmt_string))
+
+        self.rehighlight()
+
+    def highlightBlock(self, text):
+        for pattern, fmt in self.rules:
+            match_iter = pattern.globalMatch(text)
+            while match_iter.hasNext():
+                match = match_iter.next()
+                self.setFormat(match.capturedStart(), match.capturedLength(), fmt)
+
+        # A line comment overrides everything after it on the line — applied
+        # last, and skipped if it looks like it's inside an (already unclosed)
+        # quoted string earlier on the same line.
+        if self.comment_prefix:
+            idx = text.find(self.comment_prefix)
+            if idx != -1:
+                before = text[:idx]
+                if before.count('"') % 2 == 0 and before.count("'") % 2 == 0:
+                    self.setFormat(idx, len(text) - idx, self.fmt_comment)
 
 
 class AgentWorker(QThread):
@@ -590,10 +788,6 @@ class SettingsDialog(QDialog):
         form.addRow("Max steps", self.steps_box)
         form.addRow("Theme", self.theme_box)
 
-        # Opens a read-only view of the agent's built-in tools and saved skills.
-        self.skills_tools_button = QPushButton("Skills && Tools…")  # "&&" shows a literal "&"
-        self.skills_tools_button.clicked.connect(self._open_skills_tools)
-
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
@@ -605,12 +799,8 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(14)
         layout.addLayout(form)
-        layout.addWidget(self.skills_tools_button)
         layout.addWidget(buttons)
         self.setLayout(layout)
-
-    def _open_skills_tools(self):
-        SkillsToolsDialog(self, getattr(self.parent(), "c", None)).exec()
 
     @property
     def values(self):
@@ -734,8 +924,20 @@ class ChatWindow(QMainWindow):
         self.config = config
         self.messages = [current_system_message()]
         self.worker = None
+        # Messages sent while a turn is still running: the input stays live
+        # the whole time, so a send during an active turn queues here instead
+        # of starting a second worker; on_finished() drains one entry at a
+        # time once the current turn completes.
+        self._pending_queue = []
         self.items = []
         self.using_web = False
+        # Aggregate "activity" status line (native fallback only — the web
+        # bridge path animates its spinner in pure CSS, no timer needed).
+        self._status_item = None
+        self.spinner_frame = 0
+        self.spinner_timer = QTimer(self)
+        self.spinner_timer.setInterval(200)
+        self.spinner_timer.timeout.connect(self._tick_spinner)
         self.bridge = None
         # True once a message is sent in this session; only then does saving bump
         # its timestamp (so merely viewing a session doesn't reorder the list).
@@ -754,6 +956,10 @@ class ChatWindow(QMainWindow):
         # Remembers which files are already open: abspath -> editor widget,
         # so clicking the same file twice just re-focuses its tab.
         self.open_tabs = {}
+        # Cached relative-path listing of work_dir, for "@" mention matching.
+        # None means "not built yet" -- built lazily on first use, and reset
+        # (rebuilt lazily again) whenever the working directory changes.
+        self._file_index = None
 
         # Sizing for the draggable body splitter (issue: panels resize by drag).
         self._chat_min = 420    # chat never shrinks below this (~1/3 of the width)
@@ -1001,14 +1207,50 @@ class ChatWindow(QMainWindow):
             self.transcript.setOpenLinks(False)
             self.transcript.anchorClicked.connect(self.on_anchor)
 
+        # "+" attach button: opens a menu to attach files/folders/images/URLs
+        # as @-reference tokens in the message (see open_attach_menu()).
+        self.attach_button = QToolButton()
+        self.attach_button.setText("+")
+        self.attach_button.setToolTip("Attach files, folders, images, or a URL")
+        self.attach_button.setFixedSize(34, 34)
+        self.attach_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.attach_button.clicked.connect(self.open_attach_menu)
+
         self.input = QLineEdit()
-        self.input.setPlaceholderText("Ask the agent...")
+        self.input.setPlaceholderText("Ask the agent... (type @ to reference a file)")
         self.input.returnPressed.connect(self.on_send)
+        self.input.textChanged.connect(self._on_input_text_changed)
+        self.input.installEventFilter(self)
 
         self.send_button = QPushButton("Send")
         self.send_button.clicked.connect(self.on_send)
 
+        # A frameless popup list for "@" inline file-mention autocomplete.
+        #
+        # NOTE: this intentionally does NOT use Qt.WindowType.Popup. A Popup
+        # window grabs the mouse/keyboard at the OS level while shown, and
+        # that grab was not always being released cleanly when the popup was
+        # closed programmatically (from itemClicked / hide()), which left
+        # self.input unable to receive further keystrokes afterward (both
+        # "can't edit the inserted @mention" and "input box freezes" were the
+        # same underlying grab-not-released bug). Tool + WA_ShowWithoutActivating
+        # shows a borderless always-on-top window that never takes OS focus or
+        # grabs input, so self.input keeps typing focus at all times; we close
+        # it ourselves on Escape/FocusOut/no-match instead of relying on an
+        # automatic outside-click grab release.
+        self._mention_popup = QListWidget()
+        self._mention_popup.setWindowFlags(
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self._mention_popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self._mention_popup.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._mention_popup.itemClicked.connect(self._insert_mention_selection)
+        self._mention_start = -1  # index of the "@" for the mention currently being typed
+
         row = QHBoxLayout()
+        row.addWidget(self.attach_button)
         row.addWidget(self.input)
         row.addWidget(self.send_button)
 
@@ -1197,6 +1439,8 @@ class ChatWindow(QMainWindow):
         self.current_session_name = create_session_name()
         self.messages = [current_system_message()]
         self.items = [{"kind": "agent", "text": "Ready. What should I do?"}]
+        self._status_item = None
+        self.spinner_timer.stop()
         self._dirty = False
         if not self.using_web:
             self.render(scroll_to_end=True)
@@ -1219,6 +1463,8 @@ class ChatWindow(QMainWindow):
         self.items = self.items_from_messages(self.messages)
         if not self.items:
             self.items = [{"kind": "agent", "text": "(This session has no messages yet.)"}]
+        self._status_item = None
+        self.spinner_timer.stop()
         if not self.using_web:
             self.render(scroll_to_end=True)
         self.push_session_to_bridge()
@@ -1238,9 +1484,8 @@ class ChatWindow(QMainWindow):
                 self.bridge.push({"type": "user", "text": item.get("text", "")})
             elif kind == "agent":
                 self.bridge.push({"type": "assistant_message", "content": item.get("text", ""), "streaming": False})
-            elif kind == "tool":
-                self.bridge.push({"type": "tool_start", "name": item.get("name", ""), "args": item.get("args", "")})
-                self.bridge.push({"type": "tool_result", "name": item.get("name", ""), "args": item.get("args", ""), "result": item.get("result", "")})
+            elif kind == "status":
+                self.bridge.push({"type": "status", "counts": item.get("counts", {})})
             elif kind == "diff":
                 self.bridge.push({"type": "diff", "path": item.get("path", ""), "diff": item.get("diff", "")})
             elif kind == "error":
@@ -1250,20 +1495,23 @@ class ChatWindow(QMainWindow):
     def items_from_messages(self, messages):
         """Turn saved chat messages back into transcript items for display.
 
-        Tool results live in their own 'tool' messages, so we first index them by
-        id, then attach each result to the matching tool call. (Inline diffs are
-        live-only and aren't stored, so they simply don't reappear on resume.)
+        Tool calls within a turn are collapsed into one frozen aggregate status
+        line (matching the live behavior), rather than one row per call. (Tool
+        results and inline diffs are live-only and aren't stored, so they
+        simply don't reappear on resume.)
         """
-        results = {
-            message.get("tool_call_id"): message.get("content", "")
-            for message in messages
-            if message.get("role") == "tool"
-        }
-
         items = []
+        turn_counts = {}
+
+        def flush_turn():
+            if turn_counts:
+                items.append({"kind": "status", "active": False, "counts": dict(turn_counts)})
+                turn_counts.clear()
+
         for message in messages:
             role = message.get("role")
             if role == "user":
+                flush_turn()
                 items.append({"kind": "user", "text": message.get("content", "")})
             elif role == "assistant":
                 content = message.get("content") or ""
@@ -1271,12 +1519,12 @@ class ChatWindow(QMainWindow):
                     items.append({"kind": "agent", "text": content})
                 for call in message.get("tool_calls") or []:
                     function = call.get("function", {})
-                    items.append({
-                        "kind": "tool",
-                        "name": function.get("name", "tool"),
-                        "args": function.get("arguments", ""),
-                        "result": results.get(call.get("id"), ""),
-                    })
+                    category, count = classify_tool_call(
+                        function.get("name", ""), function.get("arguments", "")
+                    )
+                    turn_counts[category] = turn_counts.get(category, 0) + count
+
+        flush_turn()
         return items
 
     def save_current_session(self):
@@ -1451,12 +1699,15 @@ class ChatWindow(QMainWindow):
         self.fs_model.setRootPath(chosen)
         self.tree.setRootIndex(self.fs_model.index(chosen))
         self._update_dir_label()
+        self._file_index = None  # rebuilt lazily for the new folder, on next @-mention
 
         # Sessions are stored per-project, so start a fresh one in the new folder
         # and show that project's saved sessions.
         self.current_session_name = create_session_name()
         self.messages = [current_system_message()]
         self.items = [{"kind": "agent", "text": "Ready. What should I do?"}]
+        self._status_item = None
+        self.spinner_timer.stop()
         self._dirty = False
         if not self.using_web:
             self.render(scroll_to_end=True)
@@ -1488,9 +1739,15 @@ class ChatWindow(QMainWindow):
         editor = QPlainTextEdit()
         editor.setReadOnly(True)
         editor.setPlainText(text)
+        # No wrap: code reads better with real line breaks preserved (scrolls
+        # horizontally instead of reflowing lines, which garbles indentation).
         editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         editor.setFont(QFont("Consolas", 11))
         editor.setProperty("file_path", path)  # remember which file this is
+
+        # Lightweight syntax highlighting, picked by extension. Kept as an
+        # attribute so apply_theme() can recolor it when the theme changes.
+        editor.highlighter = CodeHighlighter(editor.document(), os.path.splitext(path)[1], self.c)
 
         index = self.editor_tabs.addTab(editor, os.path.basename(path))
         self.editor_tabs.setTabToolTip(index, path)
@@ -1520,6 +1777,9 @@ class ChatWindow(QMainWindow):
             f"QPlainTextEdit {{ background:{c['code_bg']}; color:{c['code_fg']};"
             f" border:none; padding:8px; }}"
         )
+        highlighter = getattr(editor, "highlighter", None)
+        if highlighter is not None:
+            highlighter.set_colors(c)  # also re-runs highlighting with the new theme
 
     # --- inline diff rendering --------------------------------------------
 
@@ -1670,6 +1930,18 @@ class ChatWindow(QMainWindow):
             f"QPushButton:hover {{ background:{c['btn_hover']}; }}"
             f"QPushButton:disabled {{ background:{c['subtle']}; }}"
         )
+        self.attach_button.setStyleSheet(
+            f"QToolButton {{ border:1px solid {c['input_border']}; border-radius:8px;"
+            f" background:{c['input_bg']}; color:{c['text']}; font-size:18px; font-weight:bold; }}"
+            f"QToolButton:hover {{ background:{c['border']}; }}"
+        )
+        self._mention_popup.setStyleSheet(
+            f"QListWidget {{ background:{c['surface']}; color:{c['text']};"
+            f" border:1px solid {c['border']}; border-radius:8px; padding:4px;"
+            f" font-family:Consolas,monospace; font-size:12px; }}"
+            f"QListWidget::item {{ padding:4px 8px; border-radius:4px; }}"
+            f"QListWidget::item:selected {{ background:{c['btn_bg']}; color:white; }}"
+        )
 
         if not self.using_web:
             self.transcript.document().setDefaultStyleSheet(self.transcript_css(c))
@@ -1775,9 +2047,10 @@ class ChatWindow(QMainWindow):
         c = self.c
 
         if kind == "user":
+            # A full-width, left-aligned highlighted bar (no "You" label).
             return (
-                f'<p style="color:{c["user"]};margin:0 0 2px 0"><b>You</b></p>'
-                f'<p style="margin:0">{escape(item["text"])}</p>'
+                f'<div style="background:{c["code_bg"]};border-radius:6px;'
+                f'padding:8px 12px;margin:0;text-align:left">{escape(item["text"])}</div>'
             )
 
         if kind == "reasoning":
@@ -1795,27 +2068,25 @@ class ChatWindow(QMainWindow):
             return html
 
         if kind == "agent":
-            return (
-                f'<p style="color:{c["agent"]};margin:0 0 2px 0"><b>Agent</b></p>'
-                f'<div style="margin:0">{md_to_html(item["text"])}</div>'
-            )
+            # No "Agent" label — just the response text.
+            return f'<div style="margin:0">{md_to_html(item["text"])}</div>'
 
-        if kind == "tool":
-            expanded = item.get("expanded", False)
-            arrow = "&#9660;" if expanded else "&#9654;"
-            target = escape(short_detail(item.get("args", "")))
-            call = f"{escape(item['name'])}({target})"
-            summary = escape(result_summary(item.get("result", "")))
-            header = (
-                f'<a href="toggle:{index}" style="color:{c["tool"]};text-decoration:none">'
-                f"{arrow} {call}</a>"
-                f' <span style="color:{c["subtle"]}">&#183; {summary}</span>'
-            )
-            html = f'<p style="margin:0;font-size:12px">{header}</p>'
-            if expanded:
-                full = escape((item["result"] or "")[:4000], br=False)
-                html += f'<pre style="margin:2px 0 0 18px;font-size:12px">{full}</pre>'
-            return html
+        if kind == "status":
+            # A single aggregate line per turn: a spinner + counts by category
+            # (e.g. "Read 3 files · Edited 5 files"), instead of one row per
+            # tool call. See classify_tool_call/format_activity_counts above.
+            counts_text = escape(format_activity_counts(item.get("counts", {})))
+            if item.get("active"):
+                frame = SPINNER_FRAMES[self.spinner_frame % len(SPINNER_FRAMES)]
+                verb = escape(item.get("verb") or "Working")
+                line = f'{frame} <span style="color:{c["tool"]}">{verb}&#8230;</span>'
+                if counts_text:
+                    line += f' <span style="color:{c["subtle"]}">&#183; {counts_text}</span>'
+            else:
+                if not counts_text:
+                    return ""
+                line = f'<span style="color:{c["subtle"]}">&#10003; {counts_text}</span>'
+            return f'<p style="margin:0;font-size:12px">{line}</p>'
 
         if kind == "diff":
             # A collapsible "what changed" entry shown after the agent edits a file.
@@ -1874,6 +2145,7 @@ class ChatWindow(QMainWindow):
             self.render(scroll_to_end=True)
 
     def add_user(self, text):
+        self._finalize_status_item()
         if self.bridge:
             self.bridge.push({"type": "user", "text": text})
         else:
@@ -1909,7 +2181,11 @@ class ChatWindow(QMainWindow):
         if self.bridge:
             self.bridge.push({"type": "tool_result", "name": name, "args": args, "result": result})
         else:
-            self.add({"kind": "tool", "name": name, "args": args, "result": result})
+            item = self._ensure_status_item()
+            category, count = classify_tool_call(name, args)
+            item["counts"][category] = item["counts"].get(category, 0) + count
+            item["active"] = True
+            self.render(scroll_to_end=False)
 
     def add_diff(self, path, diff_text):
         if self.bridge:
@@ -1918,6 +2194,7 @@ class ChatWindow(QMainWindow):
             self.add({"kind": "diff", "path": path, "diff": diff_text})
 
     def add_error(self, text):
+        self._finalize_status_item()
         if self.bridge:
             self.bridge.push({"type": "error", "text": text})
         else:
@@ -1926,7 +2203,40 @@ class ChatWindow(QMainWindow):
     def add_tool_start(self, name, args):
         if self.bridge:
             self.bridge.push({"type": "tool_start", "name": name, "args": args})
+        else:
+            item = self._ensure_status_item()
+            category, _count = classify_tool_call(name, args)
+            item["verb"] = ACTIVITY[category]["progress"]
+            item["active"] = True
+            self.render(scroll_to_end=False)
         self.statusBar().showMessage(f"Running {name}...")
+
+    def _ensure_status_item(self):
+        """Get (or start) this turn's aggregate activity line, and start its spinner."""
+        if self._status_item is None:
+            self._status_item = {"kind": "status", "active": True, "counts": {}, "verb": None}
+            self.add(self._status_item)
+        if not self.spinner_timer.isActive():
+            self.spinner_timer.start()
+        return self._status_item
+
+    def _finalize_status_item(self):
+        """Freeze the activity line into its final summary (or drop it if empty)."""
+        self.spinner_timer.stop()
+        item = self._status_item
+        self._status_item = None
+        if item is None:
+            return
+        item["active"] = False
+        if not format_activity_counts(item.get("counts", {})) and item in self.items:
+            self.items.remove(item)
+        if not self.using_web:
+            self.render(scroll_to_end=False)
+
+    def _tick_spinner(self):
+        self.spinner_frame += 1
+        if not self.using_web:
+            self.render(scroll_to_end=False)
 
     def on_anchor(self, url):
         link = url.toString()
@@ -1938,17 +2248,235 @@ class ChatWindow(QMainWindow):
         else:
             QDesktopServices.openUrl(url)
 
+    # --- attachments ("+" menu) and "@" inline file mentions ---------------
+    #
+    # Both features just insert plain "@token" text into the chat input --
+    # there's no special backend parsing. The agent's existing tools
+    # (read_files, fetch_web, ...) already handle whatever path/URL text
+    # appears in your message, so no changes to the agent core are needed.
+
+    def open_attach_menu(self):
+        """The '+' button: a small menu to attach files/folders/images/a URL."""
+        menu = QMenu(self)
+        menu.setStyleSheet(self._menu_css())
+        act_files = menu.addAction("📄  Files…")
+        act_folder = menu.addAction("📁  Folder…")
+        act_images = menu.addAction("🖼  Images…")
+        act_paste = menu.addAction("📋  Paste image")
+        act_url = menu.addAction("🔗  URL…")
+
+        menu.adjustSize()
+        button_top_left = self.attach_button.mapToGlobal(QPoint(0, 0))
+        pos = QPoint(button_top_left.x(), button_top_left.y() - menu.sizeHint().height())
+
+        chosen = menu.exec(pos)
+        if chosen is act_files:
+            self._attach_files()
+        elif chosen is act_folder:
+            self._attach_folder()
+        elif chosen is act_images:
+            self._attach_images()
+        elif chosen is act_paste:
+            self._attach_paste_image()
+        elif chosen is act_url:
+            self._attach_url()
+
+    def _attach_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Attach files", self.work_dir)
+        for path in paths:
+            self._insert_attachment_token(self._display_path(path))
+
+    def _attach_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "Attach folder", self.work_dir)
+        if path:
+            self._insert_attachment_token(self._display_path(path))
+
+    def _attach_images(self):
+        # Note: the configured model (deepseek-v4-flash) doesn't accept image
+        # input, so an attached image is just a path reference like any other
+        # file -- not sent as image content. Switch to a vision-capable model
+        # on your opencode-go plan first if you want actual image understanding.
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Attach images", self.work_dir,
+            "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)",
+        )
+        for path in paths:
+            self._insert_attachment_token(self._display_path(path))
+
+    def _attach_paste_image(self):
+        image = QApplication.clipboard().image()
+        if image.isNull():
+            self.statusBar().showMessage("No image on the clipboard")
+            return
+        folder = Path(self.work_dir) / ".simpleagent" / "pasted_images"
+        folder.mkdir(parents=True, exist_ok=True)
+        filename = f"pasted_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
+        path = folder / filename
+        image.save(str(path), "PNG")
+        self._insert_attachment_token(self._display_path(str(path)))
+        self.statusBar().showMessage(f"Pasted image saved: {path.name}")
+
+    def _attach_url(self):
+        url, ok = QInputDialog.getText(self, "Attach URL", "URL:")
+        if ok and url.strip():
+            self._insert_attachment_token(url.strip())
+
+    def _display_path(self, path):
+        """A path relative to the project folder when possible, else absolute."""
+        try:
+            rel = os.path.relpath(path, self.work_dir)
+            if not rel.startswith(".."):
+                return rel.replace(os.sep, "/")
+        except ValueError:
+            pass  # e.g. a different drive on Windows
+        return path
+
+    def _insert_attachment_token(self, token):
+        """Insert '@token ' into the chat input at the current cursor position."""
+        text = self.input.text()
+        pos = self.input.cursorPosition()
+        prefix, suffix = text[:pos], text[pos:]
+        needs_space_before = bool(prefix) and not prefix.endswith((" ", "\n"))
+        insertion = (" " if needs_space_before else "") + f"@{token} "
+        self.input.setText(prefix + insertion + suffix)
+        self.input.setCursorPosition(len(prefix) + len(insertion))
+        self.input.setFocus()
+
+    def _project_files(self, limit=4000):
+        """Cached relative-path listing of work_dir, for @-mention matching."""
+        if self._file_index is None:
+            skip_dirs = {
+                ".git", "__pycache__", "node_modules", ".venv", "venv", "dist",
+                "build", ".simpleagent", ".pytest_cache", ".idea", ".vscode", ".mypy_cache",
+            }
+            results = []
+            for root, dirs, files in os.walk(self.work_dir):
+                dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+                for name in files:
+                    full = os.path.join(root, name)
+                    rel = os.path.relpath(full, self.work_dir).replace(os.sep, "/")
+                    results.append(rel)
+                    if len(results) >= limit:
+                        break
+                if len(results) >= limit:
+                    break
+            self._file_index = results
+        return self._file_index
+
+    def _on_input_text_changed(self, _text):
+        self._update_mention_popup()
+
+    def _active_mention_query(self):
+        """Return (at_index, query) for the "@mention" under the cursor, else None."""
+        text = self.input.text()
+        cursor = self.input.cursorPosition()
+        at_index = text.rfind("@", 0, cursor)
+        if at_index == -1:
+            return None
+        between = text[at_index + 1:cursor]
+        if any(ch.isspace() for ch in between):
+            return None
+        return at_index, between
+
+    def _update_mention_popup(self):
+        active = self._active_mention_query()
+        if active is None:
+            self._hide_mention_popup()
+            return
+        at_index, query = active
+        matches = [f for f in self._project_files() if query.lower() in f.lower()][:15]
+        if not matches:
+            self._hide_mention_popup()
+            return
+        self._mention_start = at_index
+        self._mention_popup.clear()
+        self._mention_popup.addItems(matches)
+        self._mention_popup.setCurrentRow(0)
+        self._position_mention_popup()
+        if not self._mention_popup.isVisible():
+            self._mention_popup.show()
+
+    def _position_mention_popup(self):
+        row_height = self._mention_popup.sizeHintForRow(0) or 22
+        height = min(row_height * self._mention_popup.count() + 8, 220)
+        self._mention_popup.setFixedHeight(height)
+        self._mention_popup.setFixedWidth(max(self.input.width(), 240))
+        top_left = self.input.mapToGlobal(QPoint(0, 0))
+        self._mention_popup.move(top_left.x(), top_left.y() - height)
+
+    def _hide_mention_popup(self):
+        if self._mention_popup.isVisible():
+            self._mention_popup.hide()
+        self._mention_start = -1
+
+    def _insert_mention_selection(self, item=None):
+        if item is None:
+            item = self._mention_popup.currentItem()
+        if item is None or self._mention_start == -1:
+            self._hide_mention_popup()
+            return
+        text = self.input.text()
+        cursor = self.input.cursorPosition()
+        chosen = item.text()
+        new_text = text[:self._mention_start] + f"@{chosen} " + text[cursor:]
+        new_cursor = self._mention_start + len(chosen) + 2  # "@" + text + trailing space
+        self._hide_mention_popup()
+        self.input.setText(new_text)
+        self.input.setCursorPosition(new_cursor)
+        # Force real (OS-level) keyboard focus back onto the input. The popup
+        # never took the OS grab (WA_ShowWithoutActivating), but the window
+        # itself may not be the active one if the click came from elsewhere.
+        self.activateWindow()
+        self.input.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def eventFilter(self, obj, event):
+        # Forward keyboard nav to the mention popup while it's open (the popup
+        # itself has no keyboard focus -- self.input keeps typing focus).
+        if obj is self.input:
+            if event.type() == QEvent.Type.FocusOut and self._mention_popup.isVisible():
+                self._hide_mention_popup()
+            elif self._mention_popup.isVisible() and event.type() == QEvent.Type.KeyPress:
+                key = event.key()
+                if key == Qt.Key.Key_Down:
+                    row = min(self._mention_popup.currentRow() + 1, self._mention_popup.count() - 1)
+                    self._mention_popup.setCurrentRow(row)
+                    return True
+                if key == Qt.Key.Key_Up:
+                    row = max(self._mention_popup.currentRow() - 1, 0)
+                    self._mention_popup.setCurrentRow(row)
+                    return True
+                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab):
+                    self._insert_mention_selection()
+                    return True
+                if key == Qt.Key.Key_Escape:
+                    self._hide_mention_popup()
+                    return True
+        return super().eventFilter(obj, event)
+
     # --- interaction -------------------------------------------------------
 
     def on_send(self):
-        if self.worker is not None:
-            return
+        self._hide_mention_popup()
 
         text = self.input.text().strip()
         if not text:
             return
 
         self.input.clear()
+
+        if self.worker is not None:
+            # A turn is already running. The input stays live the whole time
+            # (no disabling), so this send is queued and shown now; it's
+            # actually dispatched to the agent once the current turn finishes
+            # (see on_finished draining self._pending_queue).
+            self._pending_queue.append(text)
+            self.add_user(text)
+            self.statusBar().showMessage(f"Queued ({len(self._pending_queue)} waiting) — sends once the agent is free")
+            return
+
+        self._start_turn(text)
+
+    def _start_turn(self, text):
         self.add_user(text)
         self._dirty = True  # a real turn — this session may now move to the top
         self.set_busy(True)
@@ -1994,18 +2522,34 @@ class ChatWindow(QMainWindow):
     def on_finished(self):
         if self.bridge:
             self.bridge.push({"type": "done"})
-        self.set_busy(False)
+        else:
+            self._finalize_status_item()
         self.worker = None
-        self.statusBar().showMessage("Ready")
         # Persist the turn and refresh the sidebar (time / preview may have changed).
         self.save_current_session()
         self.refresh_sessions()
 
+        if self._pending_queue:
+            # Messages typed/sent while this turn was running -- dispatch the
+            # next one immediately instead of going idle.
+            next_text = self._pending_queue.pop(0)
+            self._start_turn(next_text)
+        else:
+            self.set_busy(False)
+            self.statusBar().showMessage("Ready")
+
     def set_busy(self, busy):
-        self.input.setDisabled(busy)
-        self.send_button.setDisabled(busy)
+        # The input is never disabled: it stays live the whole time so you
+        # can keep typing/sending while the agent works (queued turns are
+        # dispatched one at a time from on_finished). Send just relabels
+        # itself to make the queueing behavior visible.
+        self.send_button.setText("Queue" if busy else "Send")
         if not busy:
-            self.input.setFocus()
+            # Explicitly reclaim OS-level window/keyboard focus, not just
+            # Qt's logical focus widget -- guards against the input looking
+            # enabled but not actually receiving keystrokes.
+            self.activateWindow()
+            self.input.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def closeEvent(self, event):
         # Save the conversation when the window closes so nothing is lost.

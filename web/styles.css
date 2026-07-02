@@ -61,18 +61,18 @@ body {
 .item { margin-bottom: 18px; }
 
 /* ---- user ---- */
-.item-user { text-align: right; }
+.item-user { text-align: left; }
 .item-user .bubble {
-  display: inline-block; text-align: left;
+  display: block; text-align: left;
   background: color-mix(in srgb, var(--user) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--user) 30%, transparent);
+  border-left: 3px solid var(--user);
   color: var(--text);
-  padding: 8px 12px; border-radius: 12px; max-width: 80%;
-  white-space: pre-wrap; word-break: break-word;
+  padding: 8px 12px; border-radius: 6px; width: 100%;
+  white-space: pre-wrap; word-break: break-word; box-sizing: border-box;
 }
 
 /* ---- agent ---- */
-.item-agent .label { color: var(--agent); font-weight: 700; margin-bottom: 4px; }
+.item-agent .label { display: none; }
 
 /* ---- markdown ---- */
 .item-agent .md { line-height: 1.6; }
@@ -179,8 +179,8 @@ body {
 .markdown-code .copy-btn:hover { color: var(--text); }
 
 /* ---- reasoning ---- */
-.item-reasoning .toggle { color: var(--subtle); cursor: pointer; font-size: 12px; user-select: none; }
-.item-reasoning .body { margin: 4px 0 0 18px; font-size: 12px; color: var(--subtle); }
+.item-reasoning .label { color: var(--subtle); font-size: 12px; font-weight: 600; user-select: none; margin-bottom: 2px; }
+.item-reasoning .body { margin: 4px 0 0 18px; font-size: 12px; color: var(--subtle); display: block; }
 .item-reasoning .body .md-content { font-size: 12px; color: var(--subtle); }
 .item-reasoning .body .md-content p { margin: 0.3em 0; }
 .shimmer {
@@ -190,18 +190,39 @@ body {
 }
 @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
-/* ---- tool cards ---- */
+/* ---- activity status (aggregate spinner + counts, replaces per-call tool cards) ---- */
+.item-status {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--subtle);
+}
+.item-status .spinner {
+  display: inline-block; flex: 0 0 12px; width: 12px; height: 12px;
+  border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--tool);
+}
+.item-status .spinner.spin { animation: spin 0.8s linear infinite; }
+.item-status .spinner.done {
+  border: none; width: 12px; height: 12px;
+  display: flex; align-items: center; justify-content: center;
+}
+.item-status .spinner.done::before { content: "\2713"; color: var(--agent); font-size: 12px; line-height: 1; }
+.item-status .verb { color: var(--tool); }
+.item-status .counts::before { content: "\00b7"; margin: 0 6px 0 0; opacity: 0.6; }
+.item-status .counts:empty::before { content: ""; margin: 0; }
+
+/* ---- tool cards (legacy; app.js no longer creates these) ---- */
 .tool-card {
   border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
   padding: 8px 12px; font-size: 13px;
+  max-width: 100%; min-width: 0; overflow: hidden;
 }
-.tool-card .head { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.tool-card .head { display: flex; align-items: center; gap: 8px; cursor: pointer; min-width: 0; }
 .tool-card .icon { width: 16px; height: 16px; flex: 0 0 16px; color: var(--tool); }
-.tool-card .title { color: var(--text); font-weight: 500; }
-.tool-card .subtitle { color: var(--subtle); font-family: var(--font-mono); font-size: 12px; }
-.tool-card .summary { color: var(--subtle); margin-left: auto; font-size: 12px; }
+.tool-card .title { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.tool-card .subtitle { color: var(--subtle); font-family: var(--font-mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.tool-card .summary { color: var(--subtle); margin-left: auto; font-size: 12px; white-space: nowrap; flex-shrink: 0; }
 .tool-card .status { width: 14px; height: 14px; flex: 0 0 14px; }
 .tool-card .status.pending { animation: spin 1s linear infinite; }
+.tool-card.pending .subtitle { display: none; }
 .tool-card .result {
   margin-top: 8px; padding: 8px; background: var(--code-bg); border-radius: 6px;
   font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap;

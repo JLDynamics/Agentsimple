@@ -7,7 +7,6 @@
   const root = document.getElementById("transcript");
   const items = [];            // {el, kind, ...} — mirrors Python's self.items
   let pendingAssistant = null; // the currently-streaming message element
-  let pendingTool = null;      // the most recent tool_start card (awaiting its result)
   let pendingReasoning = null; // the currently-streaming reasoning block
 
   // ---- helpers ----
@@ -22,18 +21,14 @@
     return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
-  function resultSummary(result) {
-    const t = (result || "").trim();
-    if (!t) return "done";
-    for (const p of ["SUCCESS", "ERROR", "BLOCKED", "CANCELLED"]) {
-      if (t.toUpperCase().startsWith(p)) {
-        const rest = t.slice(p.length).replace(/^[\s:]+/, "").split(/\s+/).slice(0, 6).join(" ");
-        return p.toLowerCase() + (rest ? " - " + rest : "");
-      }
-    }
-    const lines = t.split(/\r?\n/).filter((l) => l.trim());
-    if (lines.length > 1) return lines.length + " lines";
-    return t.split(/\s+/).slice(0, 8).join(" ");
+  // Both navigator.clipboard (needs a "secure context", which file: pages
+  // don't get) and document.execCommand('copy') are unreliable in QtWebEngine
+  // from a file:// origin. Instead, navigate to a custom 'copy:' pseudo-URL
+  // that qt_app.py's _BridgePage intercepts and copies via Qt's own system
+  // clipboard — that always works since it never touches the browser APIs.
+  function copyToClipboard(text) {
+    window.location.href = "copy:" + encodeURIComponent(text);
+    return Promise.resolve();
   }
 
   // ---- markdown pipeline ----
@@ -142,7 +137,7 @@
       const btn = el("button", "copy-btn", "Copy");
       btn.dataset.slot = "markdown-copy-button";
       btn.addEventListener("click", () => {
-        navigator.clipboard.writeText(code ? code.textContent : "").then(() => {
+        copyToClipboard(code ? code.textContent : "").then(() => {
           btn.textContent = "Copied";
           setTimeout(() => (btn.textContent = "Copy"), 2000);
         });
@@ -230,61 +225,105 @@
     st.timer = setTimeout(run, PACE_MS);
   }
 
-  // ---- tool cards ----
-  const TOOL_ICONS = {
-    editor: "M11 4H4v14h14v-7M18.5 2.5 22 6 9 19l-4 1 1-4 12.5-13.5z",
-    run_command: "M4 5h16v10H4zM6 19h4M14 19h4M8 17v2M16 17v2",
-    read_files: "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7zM12 9a3 3 0 100 6 3 3 0 000-6z",
-    search_codebase: "M21 21l-6-6M10 4a6 6 0 100 12 6 6 0 000-12z",
-    fetch_web: "M12 2a10 10 0 100 20 10 10 0 000-20zM2 12h20M12 2c2.5 2.5 4 6 4 10s-1.5 7.5-4 10c-2.5-2.5-4-6-4-10s1.5-7.5 4-10z",
-    memory: "M9 2h6v4l4 2v12a2 2 0 01-2 2H7a2 2 0 01-2-2V8l4-2V2z",
-    skills: "M5 3h14v18l-7-4-7 4V3z",
-    sessions: "M12 7v5l3 2M12 2a10 10 0 100 20 10 10 0 000-20z",
-    ask_question: "M21 11.5a8.5 8.5 0 11-17 0 8.5 8.5 0 0117 0zM9 10h6M9 13h3",
+  // ---- activity status (aggregate, spinner-driven — no per-call cards) ----
+  // Instead of one card per tool call (which piled up into repeated rows of
+  // the same tool name and required clicking to see file text), a single
+  // line per turn accumulates counts by category and shows a spinner while
+  // work is in progress. It freezes into a plain summary once the turn ends.
+  const ACTIVITY = {
+    read:     { progress: "Reading files",        past: "Read",     noun: "file" },
+    edited:   { progress: "Editing files",         past: "Edited",   noun: "file" },
+    searched: { progress: "Searching code",        past: "Searched", noun: "search" },
+    ran:      { progress: "Running a command",     past: "Ran",      noun: "command" },
+    fetched:  { progress: "Fetching the web",       past: "Fetched",  noun: "page" },
+    memory:   { progress: "Updating memory",        past: "Updated",  noun: "memory note" },
+    skills:   { progress: "Managing skills",        past: "Updated",  noun: "skill" },
+    sessions: { progress: "Checking past sessions", past: "Checked",  noun: "session" },
+    asked:    { progress: "Asking a question",      past: "Asked",    noun: "question" },
+    other:    { progress: "Working",                past: "Used",     noun: "tool" },
   };
+  const ACTIVITY_ORDER = ["read", "edited", "searched", "ran", "fetched", "memory", "skills", "sessions", "asked", "other"];
 
-  function iconSvg(name) {
-    const d = TOOL_ICONS[name] || TOOL_ICONS.ask_question;
-    return '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="' + d + '"/></svg>';
+  function classifyTool(name, argsText) {
+    let args = {};
+    try { args = JSON.parse(argsText || "{}"); } catch {}
+    if (name === "read_files") {
+      const paths = args.paths;
+      return { category: "read", count: Array.isArray(paths) ? paths.length || 1 : 1 };
+    }
+    if (name === "editor") {
+      const op = (args.operation || "").toLowerCase();
+      return { category: "edited", count: op === "move" ? 2 : 1 };
+    }
+    if (name === "search_codebase") return { category: "searched", count: 1 };
+    if (name === "run_command") return { category: "ran", count: 1 };
+    if (name === "fetch_web") return { category: "fetched", count: 1 };
+    if (name === "memory") return { category: "memory", count: 1 };
+    if (name === "skills") return { category: "skills", count: 1 };
+    if (name === "sessions") return { category: "sessions", count: 1 };
+    if (name === "ask_question") return { category: "asked", count: 1 };
+    return { category: "other", count: 1 };
   }
 
-  function shortDetail(argsText) {
-    try {
-      const a = JSON.parse(argsText || "{}");
-      for (const k of ["path", "paths", "source", "command", "pattern", "query", "name"]) {
-        if (a[k] != null) return String(a[k]);
-      }
-    } catch {}
-    return "";
+  function formatCounts(counts) {
+    const parts = [];
+    for (const key of ACTIVITY_ORDER) {
+      const n = counts[key];
+      if (!n) continue;
+      const a = ACTIVITY[key];
+      parts.push(a.past + " " + n + " " + a.noun + (n === 1 ? "" : "s"));
+    }
+    return parts.join(" · ");
   }
 
-  function statusIcon(state) {
-    if (state === "pending")
-      return '<svg class="status pending" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 000 20 10 10 0 000-20zM12 6v6l4 2"/></svg>';
-    return '<svg class="status" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>';
+  let activityItem = null; // {el, counts, verb, active} — one per turn
+
+  function ensureActivityItem() {
+    if (activityItem) return activityItem;
+    const wrap = el("div", "item item-status");
+    wrap.innerHTML = '<span class="spinner spin"></span><span class="verb"></span><span class="counts"></span>';
+    activityItem = { el: wrap, counts: {}, active: true };
+    append({ kind: "status", el: wrap });
+    return activityItem;
   }
 
-  function buildToolCard(ev) {
-    const card = el("div", "tool-card");
-    const detail = shortDetail(ev.args);
-    const head = el("div", "head");
-    head.innerHTML = iconSvg(ev.name) +
-      '<span class="title"></span>' +
-      (detail ? '<span class="subtitle"></span>' : '') +
-      '<span class="summary">running</span>' +
-      statusIcon("pending");
-    head.querySelector(".title").textContent = ev.name + "()";
-    if (detail) head.querySelector(".subtitle").textContent = detail;
-    card.appendChild(head);
-    card._expanded = false;
-    card._result = el("div", "result");
-    card._result.style.display = "none";
-    card.appendChild(card._result);
-    head.addEventListener("click", () => {
-      card._expanded = !card._expanded;
-      card._result.style.display = card._expanded ? "block" : "none";
-    });
-    return card;
+  function renderActivity(item) {
+    const wrap = item.el;
+    const spinner = wrap.querySelector(".spinner");
+    const verbEl = wrap.querySelector(".verb");
+    const countsEl = wrap.querySelector(".counts");
+    const countsText = formatCounts(item.counts);
+    if (item.active) {
+      spinner.className = "spinner spin";
+      verbEl.textContent = (item.verb || "Working") + "…";
+    } else {
+      spinner.className = "spinner done";
+      verbEl.textContent = "";
+    }
+    countsEl.textContent = countsText;
+  }
+
+  // Renders an already-finished turn's activity line directly (used when
+  // replaying a resumed session, where counts were aggregated in Python —
+  // there are no live tool_start/tool_result events to accumulate from).
+  function renderFrozenStatus(counts) {
+    const wrap = el("div", "item item-status");
+    wrap.innerHTML = '<span class="spinner spin"></span><span class="verb"></span><span class="counts"></span>';
+    append({ kind: "status", el: wrap });
+    renderActivity({ el: wrap, counts: counts || {}, active: false });
+  }
+
+  function finalizeActivity() {
+    if (!activityItem) return;
+    activityItem.active = false;
+    renderActivity(activityItem);
+    // Nothing actually happened (e.g. the turn was cut short) — drop the empty line.
+    if (!formatCounts(activityItem.counts)) {
+      activityItem.el.remove();
+      const idx = items.findIndex((i) => i.el === activityItem.el);
+      if (idx !== -1) items.splice(idx, 1);
+    }
+    activityItem = null;
   }
 
   // ---- reasoning ----
@@ -316,12 +355,11 @@
     }
     // Stop any lingering reasoning shimmer if no final assistant message dropped it.
     if (pendingReasoning) {
-      pendingReasoning._streaming = false;
-      const toggle = pendingReasoning.querySelector(".toggle");
-      if (toggle) {
-        toggle.innerHTML = (pendingReasoning._expanded ? "▼" : "▶") + ' <b>Thinking</b>';
-      }
+      const label = pendingReasoning.querySelector(".label");
+      if (label) label.innerHTML = '<b>Thinking</b>';
     }
+    // The turn is over — freeze the activity line into its final summary.
+    finalizeActivity();
     return null;
   }
 
@@ -360,66 +398,38 @@
     if (pendingReasoning == null) {
       pendingReasoning = el("div", "item item-reasoning");
       pendingReasoning.innerHTML =
-        '<div class="toggle"></div>' +
-        '<div class="body" style="display:none"></div>';
-      pendingReasoning._expanded = false;
-      pendingReasoning.querySelector(".toggle").addEventListener("click", () => {
-        pendingReasoning._expanded = !pendingReasoning._expanded;
-        pendingReasoning.querySelector(".body").style.display =
-          pendingReasoning._expanded ? "block" : "none";
-        updateToggleArrow();
-      });
+        '<div class="label"></div>' +
+        '<div class="body"></div>';
       append({ kind: "reasoning", el: pendingReasoning });
     }
 
-    // Track current streaming state on the element so updateToggleArrow (bound
-    // once on creation) reads fresh state instead of a stale first-call closure.
-    pendingReasoning._streaming = streaming;
-
-    const toggle = pendingReasoning.querySelector(".toggle");
+    const label = pendingReasoning.querySelector(".label");
     const body = pendingReasoning.querySelector(".body");
 
     if (streaming) {
-      toggle.innerHTML = '<span class="shimmer"></span> Thinking';
+      label.innerHTML = '<span class="shimmer"></span> Thinking';
       const h = heading(ev.content);
-      if (h) toggle.innerHTML += ' <span style="opacity:.7">' + escapeText(h) + '</span>';
-      if (pendingReasoning._expanded) renderMarkdownInto(body, ev.content, false);
+      if (h) label.innerHTML += ' <span style="opacity:.7">' + escapeText(h) + '</span>';
+      renderMarkdownInto(body, ev.content, false);
     } else {
-      toggle.innerHTML = (pendingReasoning._expanded ? "▼" : "▶") + ' <b>Thinking</b>';
-      if (pendingReasoning._expanded) renderMarkdownInto(body, ev.content, true);
-    }
-
-    function updateToggleArrow() {
-      if (!pendingReasoning || pendingReasoning._streaming) return;
-      toggle.innerHTML = (pendingReasoning._expanded ? "▼" : "▶") + ' <b>Thinking</b>';
+      label.innerHTML = '<b>Thinking</b>';
+      renderMarkdownInto(body, ev.content, true);
     }
   }
 
   function handleToolStart(ev) {
-    const card = buildToolCard(ev);
-    pendingTool = { name: ev.name, card };
-    append({ kind: "tool", name: ev.name, el: card });
+    const item = ensureActivityItem();
+    item.verb = ACTIVITY[classifyTool(ev.name, ev.args).category].progress;
+    item.active = true;
+    renderActivity(item);
   }
 
   function handleToolResult(ev) {
-    // Match the most recent pending tool of the same name (order-based).
-    let target = pendingTool && pendingTool.name === ev.name ? pendingTool : null;
-    if (!target) {
-      for (let i = items.length - 1; i >= 0; i--) {
-        if (items[i].kind === "tool" && items[i].name === ev.name) { target = { card: items[i].el }; break; }
-      }
-    }
-    pendingTool = null;
-    if (!target) { target = { card: buildToolCard(ev) }; append({ kind: "tool", name: ev.name, el: target.card }); }
-
-    const card = target.card;
-    const summary = card.querySelector(".summary");
-    if (summary) summary.textContent = resultSummary(ev.result);
-    const status = card.querySelector(".status");
-    if (status) status.outerHTML = statusIcon("completed");
-    if (card._result) {
-      card._result.textContent = (ev.result || "").slice(0, 4000);
-    }
+    const item = ensureActivityItem();
+    const cls = classifyTool(ev.name, ev.args);
+    item.counts[cls.category] = (item.counts[cls.category] || 0) + cls.count;
+    item.active = true;
+    renderActivity(item);
   }
 
   function handleDiff(ev) {
@@ -460,8 +470,8 @@
   function resetTranscript() {
     items.length = 0;
     pendingAssistant = null;
-    pendingTool = null;
     pendingReasoning = null;
+    activityItem = null;
     // Clear reveal pacing state for GC; the WeakMap entries die with the DOM nodes.
     while (root.firstChild) root.removeChild(root.firstChild);
   }
@@ -472,14 +482,15 @@
     const t = ev.type;
 
     if (t === "reset") { resetTranscript(); return; }
-    if (t === "user") { append({ kind: "user", el: renderUser(ev.text) }); return; }
-    if (t === "error") { append({ kind: "error", el: renderError(ev.text) }); return; }
+    if (t === "user") { finalizeActivity(); append({ kind: "user", el: renderUser(ev.text) }); return; }
+    if (t === "error") { finalizeActivity(); append({ kind: "error", el: renderError(ev.text) }); return; }
     if (t === "done") { renderDone(); return; }
     if (t === "theme") { renderTheme(ev.mode); return; }
     if (t === "assistant_message") { handleAssistantMessage(ev); return; }
     if (t === "reasoning") { handleReasoning(ev); return; }
     if (t === "tool_start") { handleToolStart(ev); return; }
     if (t === "tool_result") { handleToolResult(ev); return; }
+    if (t === "status") { renderFrozenStatus(ev.counts); return; }
     if (t === "diff") { handleDiff(ev); return; }
   };
 

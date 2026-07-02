@@ -78,8 +78,8 @@ class MainBehaviorTests(unittest.TestCase):
     def test_default_config_enables_streaming_messages(self):
         self.assertTrue(config.DEFAULT_CONFIG["stream_messages"])
 
-    def test_default_config_hides_tool_calls_by_default(self):
-        self.assertFalse(config.DEFAULT_CONFIG["show_tool_calls"])
+    def test_default_config_shows_tool_calls_by_default(self):
+        self.assertTrue(config.DEFAULT_CONFIG["show_tool_calls"])
 
     def test_default_config_uses_safe_auto_approval_mode(self):
         self.assertEqual(config.DEFAULT_CONFIG["approval_mode"], "safe_auto")
@@ -200,36 +200,41 @@ class MainBehaviorTests(unittest.TestCase):
         self.assertIn("Mode changed for this run only: full_auto", output)
         self.assertIn("Could not save agent_config.json: disk full", output)
 
-    def test_read_file_range_tool_is_registered(self):
-        self.assertIn("read_file_range", config.AVAILABLE_TOOL)
-
-    def test_direct_coding_tools_are_registered(self):
+    def test_consolidated_tools_are_registered(self):
         expected_tools = [
-            "get_file_info",
-            "read_many_files",
-            "list_project_tree",
-            "run_python_tests",
-            "compile_python",
+            "read_files",
+            "search_codebase",
+            "editor",
+            "run_command",
+            "fetch_web",
+            "memory",
+            "skills",
+            "sessions",
+            "ask_question",
+        ]
+
+        for tool_name in expected_tools:
+            self.assertIn(tool_name, config.AVAILABLE_TOOL)
+
+    def test_old_tool_names_are_no_longer_registered(self):
+        removed = [
+            "list_files",
+            "read_file",
+            "read_file_range",
+            "write_file",
+            "apply_patch",
+            "execute_terminal_command",
             "git_status",
-            "git_diff",
-        ]
-
-        for tool_name in expected_tools:
-            self.assertIn(tool_name, config.AVAILABLE_TOOL)
-
-    def test_skill_tools_are_registered(self):
-        expected_tools = [
+            "run_python_tests",
             "list_skills",
-            "read_skill",
             "save_skill",
-            "delete_skill",
         ]
 
-        for tool_name in expected_tools:
-            self.assertIn(tool_name, config.AVAILABLE_TOOL)
+        for tool_name in removed:
+            self.assertNotIn(tool_name, config.AVAILABLE_TOOL)
 
     def test_run_tool_passes_approval_mode_to_terminal_tool(self):
-        original_tool = config.AVAILABLE_TOOL["execute_terminal_command"]
+        original_tool = config.AVAILABLE_TOOL["run_command"]
         calls = {}
 
         def fake_execute_terminal_command(command, approval_mode="safe_auto"):
@@ -238,34 +243,47 @@ class MainBehaviorTests(unittest.TestCase):
             return "SUCCESS"
 
         try:
-            config.AVAILABLE_TOOL["execute_terminal_command"] = fake_execute_terminal_command
+            config.AVAILABLE_TOOL["run_command"] = fake_execute_terminal_command
 
             result = agent.run_tool(
-                "execute_terminal_command",
+                "run_command",
                 json.dumps({"command": "python --version"}),
                 approval_mode="full_auto",
             )
 
         finally:
-            config.AVAILABLE_TOOL["execute_terminal_command"] = original_tool
+            config.AVAILABLE_TOOL["run_command"] = original_tool
 
         self.assertEqual(result, "SUCCESS")
         self.assertEqual(calls["command"], "python --version")
         self.assertEqual(calls["approval_mode"], "full_auto")
 
-    def test_system_prompt_prioritizes_execution_discipline(self):
+    def test_system_prompt_guides_execution_and_tools(self):
         system_prompt = prompt.build_system_prompt().lower()
 
-        self.assertIn("execution discipline", system_prompt)
-        self.assertIn("do not add a separate visible plan", system_prompt)
-        self.assertIn("use tools promptly", system_prompt)
+        # Execution discipline: Gather -> Think -> Act -> Verify
+        self.assertIn("gather", system_prompt)
+        self.assertIn("think", system_prompt)
         self.assertIn("root cause", system_prompt)
+        self.assertIn("act", system_prompt)
         self.assertIn("verify", system_prompt)
-        self.assertIn("do not reveal raw internal chain-of-thought", system_prompt)
-        self.assertIn("read_skill", system_prompt)
-        self.assertIn("list_skills", system_prompt)
-        self.assertNotIn("running narration is required", system_prompt)
-        self.assertNotIn("plan-a-feature", system_prompt)
+        self.assertIn("don't narrate every thought", system_prompt)
+        self.assertIn("don't claim something is fixed", system_prompt)
+
+        # All 8 consolidated tools are mentioned
+        for tool in ["read_files", "search_codebase", "editor", "run_command",
+                      "fetch_web", "memory", "skills", "sessions", "ask_question"]:
+            self.assertIn(tool, system_prompt)
+
+        # Old tool names are gone (except "read_file" which is a substring of "read_files")
+        removed = ["list_files", "read_file_range", "write_file",
+                    "apply_patch", "delete_file", "execute_terminal_command",
+                    "git_status", "git_diff", "run_python_tests", "compile_python",
+                    "web_search", "web_fetch", "update_global_memory",
+                    "search_sessions", "read_session", "list_skills",
+                    "read_skill", "save_skill", "delete_skill"]
+        for tool in removed:
+            self.assertNotIn(tool, system_prompt)
 
     def test_refresh_system_message_updates_current_skills(self):
         messages = [

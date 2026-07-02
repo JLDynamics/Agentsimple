@@ -20,7 +20,6 @@ from tools import set_llm, set_current_intent
 from ui import (
     choose_mode,
     clear_conversation,
-    is_skill_question,
     print_welcome,
     rewind_conversation,
     show_context_warning,
@@ -32,15 +31,28 @@ from ui import (
 )
 
 
+def clean_surrogates(text: str) -> str:
+    """Remove broken Unicode surrogate characters that can crash some providers."""
+    return text.encode("utf-8", "surrogatepass").decode("utf-8", "ignore")
+
+
 def main():
     load_dotenv(AGENT_HOME / ".env")
     config = load_config()
 
-    api_key = os.getenv("OPENROUTER_API_KEY")
+    # Map provider name to the env variable holding its API key
+    PROVIDER_KEY_MAP = {
+        "openrouter": "OPENROUTER_API_KEY",
+        "opencode-go": "OPENCODE_GO_API_KEY",
+    }
+
+    provider = config.get("provider", "openrouter")
+    key_name = PROVIDER_KEY_MAP.get(provider, "OPENROUTER_API_KEY")
+    api_key = os.getenv(key_name)
     model_name = config["model"]
 
     if not api_key:
-        raise ValueError("Missing OPENROUTER_API_KEY in your .env file.")
+        raise ValueError(f"Missing {key_name} in your .env file.")
 
     client = OpenAI(
         api_key=api_key,
@@ -65,7 +77,7 @@ def main():
     print_welcome(model_name, config, current_session_name, messages)
 
     while True:
-        user_input = input("You: ")
+        user_input = clean_surrogates(input("You: "))
         command = user_input.strip().lower()
 
         if command in ("exit", "/exit"):
@@ -128,13 +140,9 @@ def main():
             save_session(current_session_name, model_name, messages)
             continue
 
-        if is_skill_question(user_input):
-            show_skills()
-            continue
-
+        # ── Start a new agent turn ──
         refresh_system_message(messages)
         set_current_intent(user_input)
-        turn_start_index = len(messages)
 
         messages.append(
             {
@@ -142,6 +150,18 @@ def main():
                 "content": user_input,
             }
         )
+
+        # Automatically compress if the conversation is getting too large
+        import config as cfg_mod
+        usage = cfg_mod.get_context_usage_percent(messages, config)
+        if usage > 75:
+            print(f"📦 Context is {usage:.0f}% full — auto-compressing...")
+            messages = compact_conversation(client, model_name, messages)
+            save_session(current_session_name, model_name, messages)
+            print()
+
+        # Save BEFORE the AI call so a crash mid-response doesn't lose everything
+        save_session(current_session_name, model_name, messages)
 
         try:
             run_agent_loop(
@@ -153,14 +173,22 @@ def main():
                 str(config["approval_mode"]),
                 bool(config["show_tool_calls"]),
             )
-            save_session(current_session_name, model_name, messages)
-            show_context_warning(messages, config)
         except KeyboardInterrupt:
-            del messages[turn_start_index:]
+            # Ctrl+C during a turn: save partial results and continue.
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": "[Interrupted by user]",
+                }
+            )
+            save_session(current_session_name, model_name, messages)
 
             print()
-            print("Interrupted. Last turn removed.")
+            print("⏹️  Interrupted. Messages so far are saved.")
             print()
+
+        save_session(current_session_name, model_name, messages)
+        show_context_warning(messages, config)
 
 
 if __name__ == "__main__":

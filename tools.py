@@ -1140,3 +1140,222 @@ def execute_terminal_command(command: str, approval_mode: str = "safe_auto") -> 
 
     except Exception as error:
         return f"ERROR: {error}"
+
+
+# ---------------------------------------------------------------------------
+# Consolidated tool surface (8 tools). These dispatchers route one tool call
+# to the focused implementations above, so the model sees a small schema while
+# all the existing logic (caps, safety, frontmatter, search) is preserved.
+# ---------------------------------------------------------------------------
+
+
+def _as_path_list(paths):
+    """Normalize the 'paths' argument into a list of strings (tolerate a single string)."""
+    if paths is None:
+        return ["."]
+    if isinstance(paths, str):
+        return [paths]
+    return [str(p) for p in paths] or ["."]
+
+
+@tool
+def read_files(
+    paths,
+    mode: str = "read",
+    start_line=None,
+    end_line=None,
+    max_depth=2,
+    pattern=None,
+    file_glob=None,
+) -> str:
+    """Inspect and read files/folders. mode: read | list | tree | glob | info."""
+    paths_list = _as_path_list(paths)
+    mode = (mode or "read").lower()
+
+    if mode == "read":
+        has_range = start_line is not None and end_line is not None
+        if has_range:
+            if len(paths_list) == 1:
+                return read_file_range(paths_list[0], int(start_line), int(end_line))
+            sections = [
+                read_file_range(p, int(start_line), int(end_line))
+                for p in paths_list
+            ]
+            return "\n\n---\n\n".join(sections)
+        if len(paths_list) > 1:
+            return read_many_files(paths_list)
+        return read_file(paths_list[0])
+
+    if mode == "list":
+        return "\n\n".join(f"[{p}]\n{list_files(p)}" for p in paths_list)
+
+    if mode == "tree":
+        depth = max_depth if max_depth is not None else 2
+        return list_project_tree(paths_list[0], depth)
+
+    if mode == "glob":
+        if not pattern:
+            return "ERROR: 'glob' mode requires 'pattern'."
+        return glob_files(pattern, paths_list[0])
+
+    if mode == "info":
+        return "\n\n".join(get_file_info(p) for p in paths_list)
+
+    return f"ERROR: Unknown mode '{mode}'. Use read, list, tree, glob, or info."
+
+
+@tool
+def search_codebase(pattern: str, path: str = ".", file_glob: str = "") -> str:
+    """Search the project for a word or regex (case-insensitive)."""
+    return search_files(pattern, path=path, file_glob=file_glob)
+
+
+@tool
+def editor(
+    operation: str,
+    path: str = None,
+    content: str = None,
+    replacements: list = None,
+    source: str = None,
+    destination: str = None,
+) -> str:
+    """Create or change files. operation: write | patch | delete | move."""
+    operation = (operation or "").lower()
+
+    if operation == "write":
+        if not path or content is None:
+            return "ERROR: 'write' requires 'path' and 'content'."
+        return write_file(path, content)
+
+    if operation == "patch":
+        if not path or not replacements:
+            return "ERROR: 'patch' requires 'path' and 'replacements'."
+        return apply_patch(path, replacements)
+
+    if operation == "delete":
+        if not path:
+            return "ERROR: 'delete' requires 'path'."
+        return delete_file(path)
+
+    if operation == "move":
+        if not source or not destination:
+            return "ERROR: 'move' requires 'source' and 'destination'."
+        return move_file(source, destination)
+
+    return f"ERROR: Unknown operation '{operation}'. Use write, patch, delete, or move."
+
+
+@tool
+def run_command(command: str, approval_mode: str = "safe_auto") -> str:
+    """Run a shell command, gated by the safety layer (safety.decide_command)."""
+    return execute_terminal_command(command, approval_mode=approval_mode)
+
+
+
+@tool
+def fetch_web(
+    url: str = None,
+    query: str = None,
+    prompt: str = None,
+    max_results: int = 5,
+    time_limit: str = "",
+    search_type: str = "text",
+    search_depth: str = "basic",
+    include_domains: list = None,
+    exact_match: bool = False,
+) -> str:
+    """Fetch one URL, or run a web search when 'query' is given instead of 'url'."""
+    if url:
+        return web_fetch(url, prompt or "")
+    if query:
+        return web_search(
+            query,
+            max_results=max_results,
+            timelimit=time_limit or "",
+            search_type=search_type,
+            search_depth=search_depth,
+            include_domains=include_domains,
+            exact_match=exact_match,
+        )
+    return "ERROR: Provide 'url' to fetch a page or 'query' to run a web search."
+
+
+@tool
+def memory(scope: str, content: str) -> str:
+    """Update long-term memory. scope: global | project (full overwrite)."""
+    scope = (scope or "").lower()
+    if scope == "global":
+        return update_global_memory(content)
+    if scope == "project":
+        return update_project_memory(content)
+    return f"ERROR: Unknown scope '{scope}'. Use 'global' or 'project'."
+
+
+@tool
+def skills(
+    action: str,
+    name: str = None,
+    description: str = None,
+    content: str = None,
+    scope: str = "project",
+) -> str:
+    """Manage reusable skills. action: list | read | save | delete."""
+    action = (action or "").lower()
+
+    if action == "list":
+        return list_skills()
+    if action == "read":
+        if not name:
+            return "ERROR: 'read' requires 'name'."
+        return read_skill(name)
+    if action == "save":
+        if not name or description is None or content is None:
+            return "ERROR: 'save' requires 'name', 'description', and 'content'."
+        return save_skill(name, description, content, scope=scope or "project")
+    if action == "delete":
+        if not name:
+            return "ERROR: 'delete' requires 'name'."
+        return delete_skill(name)
+
+    return f"ERROR: Unknown action '{action}'. Use list, read, save, or delete."
+
+
+@tool
+def sessions(action: str, query: str = None, name: str = None) -> str:
+    """Recall past conversations. action: search | read."""
+    action = (action or "").lower()
+
+    if action == "search":
+        if not query:
+            return "ERROR: 'search' requires 'query'."
+        return search_sessions(query)
+    if action == "read":
+        if not name:
+            return "ERROR: 'read' requires 'name'."
+        return read_session(name)
+
+    return f"ERROR: Unknown action '{action}'. Use search or read."
+
+
+@tool
+def ask_question(question: str, options: list) -> str:
+    """Ask the user a clarifying question with 2-5 selectable options."""
+    if not options or len(options) < 2:
+        return "ERROR: Provide at least 2 options."
+    if len(options) > 5:
+        return "ERROR: Provide at most 5 options."
+
+    print()
+    print(question)
+    for i, opt in enumerate(options, start=1):
+        print(f"  {i}. {opt}")
+
+    while True:
+        choice = input("Pick a number: ").strip()
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(options):
+                return f"User chose: {options[idx]}"
+        except ValueError:
+            pass
+        print(f"Please enter a number between 1 and {len(options)}.")
